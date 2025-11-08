@@ -49,3 +49,8 @@ Thumbs.db
 *.tmp
 *.bak
 *.cache
+
+# Large data files (over 100MB - use Git LFS if needed)
+01_국회_회의록_요약/preprocess/jinsu/국회회의록안건별요약_train.json
+01_국회_회의록_요약/preprocess/jinsu/preprocessed/국회회의록안건별요약_train_preprocessed.txt
+01_국회_회의록_요약/preprocess/jinsu/preprocessed/국회회의록안건별요약_train_preprocessed.json
