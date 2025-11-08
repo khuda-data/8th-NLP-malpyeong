@@ -27,6 +27,10 @@ env/
 ENV/
 .venv
 
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
 # IDE
 .vscode/
 .idea/
@@ -34,13 +38,14 @@ ENV/
 *.swo
 *~
 .DS_Store
-
+Thumbs.db
 
 # Logs
 *.log
+.cache/
+.pytest_cache/
 
 # Temporary files
 *.tmp
 *.bak
 *.cache
-
