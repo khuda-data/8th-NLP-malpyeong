@@ -54,3 +54,9 @@ Thumbs.db
 01_국회_회의록_요약/preprocess/jinsu/국회회의록안건별요약_train.json
 01_국회_회의록_요약/preprocess/jinsu/preprocessed/국회회의록안건별요약_train_preprocessed.txt
 01_국회_회의록_요약/preprocess/jinsu/preprocessed/국회회의록안건별요약_train_preprocessed.json
+
+# Environment variables
+.env
+*.env
+.env.local
+.env.*.local
