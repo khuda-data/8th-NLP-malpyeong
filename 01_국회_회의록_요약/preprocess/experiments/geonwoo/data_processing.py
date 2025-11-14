@@ -1,52 +1,233 @@
 import json
+import hanja_module.hanjahangul as hanja
 
-INDEX = 83
+INDEX = 4
 
-input_path = "국회회의록안건별요약_dev.json"
-output_path = f"국회회의록안건별요약_dev_sample_{INDEX}.json"
+MAX_CHUNK_LEN = 500
+CONFIG_PROMPT = """당신은 대한민국 국회의 회의록을 요약하는 전문가입니다. 주어진 대화 내용에서 핵심적인 발언들을 선별하여 요약문을 작성해야 합니다.
+다음은 회의록의 주제와 관련된 정보입니다:
+주제: {topic}
+주요 키워드: {keyword}
+발언자: {speaker}
+
+다음은 회의록의 대화 내용입니다. 대화 내용 중 핵심적인 발언들을 선별하여 요약문을 작성하세요.
+"""
+CONFIG_SPEAKER = "<ROLE>{occupation}<ROLE> <NAME>{name}<NAME>"
+
+def get_index_from_id(id_):
+    return int(id_.split(".")[-1]) - 1
+
+def preprocess_conversation(input_conversation, speaker_same_as_previous=False):
+    return_text = (" " if speaker_same_as_previous else input_conversation["speaker"] + ": ") + input_conversation["utterance"]
+    return_text = return_text.replace("......", "<REMOVE_DOTS>")
+
+    return return_text
+
+def speaker_to_text(speakers):
+    return_text = ", ".join(
+        list(
+            map(
+                lambda x: 
+                    CONFIG_SPEAKER.replace("{occupation}", x['occupation']).replace("{name}", hanja.hanja_to_hangul_dueum(x['id'])),
+                speakers
+            )
+        )
+    )
+    
+    return return_text
+
+def make_chunk_index_list_by_lengths(lengths, max_chunk_len):
+    """길이 리스트를 기준으로 누적 길이가 max_chunk_len을 넘지 않도록 인덱스들을 묶는다.
+
+    Args:
+        lengths (List[int]): 각 원소의 길이 리스트.
+        max_chunk_len (int): 청크의 최대 누적 길이.
+
+    Returns:
+        List[List[int]]: 인덱스 묶음 리스트. 예: [[0, 1], [2, 3], ...]
+    """
+    chunks = []
+    current = []
+    current_len = 0
+
+    for i, l in enumerate(lengths):
+        # 현재 청크에 추가 시 초과하는 경우, 청크를 마감하고 새로 시작
+        if current and current_len + l > max_chunk_len:
+            chunks.append(current)
+            current = [i]
+            current_len = l
+        else:
+            # 비어있을 때거나 초과하지 않을 때는 현재 청크에 추가
+            current.append(i)
+            current_len += l
+
+        # 단일 원소가 max_chunk_len보다 긴 경우에도 단독 청크로 둔다
+        if not current[:-1] and l > max_chunk_len:
+            # 방금 추가한 단일 원소 청크를 바로 확정
+            chunks.append(current)
+            current = []
+            current_len = 0
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+def make_chunk_index_list(texts, max_chunk_len):
+    """문자열 리스트를 받아 각 원소의 길이(len) 기준으로 청크 인덱스 리스트를 만든다.
+
+    Args:
+        texts (List[str]): 청크 대상으로 묶을 문자열 리스트.
+        max_chunk_len (int): 청크의 최대 누적 길이.
+
+    Returns:
+        List[List[int]]: 인덱스 묶음 리스트. 예: [[0, 1], [2]]
+
+    예시:
+        texts 길이가 [10, 5, 6], max_chunk_len=20이면 -> [[0, 1], [2]]
+    """
+    lengths = [len(t) for t in texts]
+    return make_chunk_index_list_by_lengths(lengths, max_chunk_len)
+
+input_path = "./data/국회회의록안건별요약_dev.json"
 
 with open(input_path, "r", encoding="utf-8") as f:
     data = json.load(f)
 
 sample = data[INDEX - 1]
 
-inp = sample["input"]
-issue = inp["issue"]
+sample_inp = sample["input"]
+issue = sample_inp["issue"]
 
-begin = issue["begin"]
-end = issue["end"]
+speaker = sample_inp["speaker"]
+topic = hanja.hanja_to_hangul_dueum(issue["topic"])
+keyword = issue['keyword']
+
 keyword_sentence_id = issue['sentence_id']
-main_issue_id = keyword_sentence_id.split(".")[0]
-keyword_sentence_int = int(keyword_sentence_id.split(".")[-1])
+keyword_sentence_int = get_index_from_id(keyword_sentence_id)
 
 begin_id = keyword_sentence_id
-end_id = inp["conversation"][-1]["id"]
+end_id = sample_inp["conversation"][-1]["id"]
 
 is_begine_found = False
 is_end_found = False
 
 ids = []
 
+########################################################
+# 프롬프트 설계
+########################################################
+
+PROMPT = CONFIG_PROMPT.replace("{topic}", topic).replace("{keyword}", keyword).replace("{speaker}", speaker_to_text(speaker))
+
+########################################################
+# 전처리 1단계
+# 
+# "선포"로 나누는 과정
+########################################################
+
 for conv in sample["input"]["conversation"]:
     if "선포" in conv["utterance"]:
         id_ = conv["id"]
-        id_int = id_.split(".")[-1]
-        issue_id = id_.split(".")[0]
+        id_int = get_index_from_id(id_)
+        
+        ids.append(id_)
 
-        if main_issue_id == issue_id:
-            ids.append(id_)
+        if not is_begine_found and id_int < keyword_sentence_int:
+            begin_id = id_
+            is_begine_found = True
+        if not is_end_found and id_int > keyword_sentence_int:
+            end_id = id_
+            is_end_found = True
 
-            if not is_begine_found and int(id_int) < keyword_sentence_int:
-                begin_id = id_
-                is_begine_found = True
-            if not is_end_found and int(id_int) > keyword_sentence_int:
-                end_id = id_
-                is_end_found = True
+########################################################
+# 전처리 2단계
+#
+# begin_id ~ end_id 범위의 발화를 순회하며 필터링한다.
+#
+# 1) 1차 길이 필터: 공백과 '.'을 제거한 문자열 길이가 11자 이상인지 확인한다.
+#    - 11자 미만이면 즉시 제외.
+# 2) 길이 통과 후 포함 규칙:
+#    - 숫자 포함 문장: 포함.
+#    - '.......' 포함 문장: 정제 길이(공백·마침표 제거) >= 20 일 때만 포함.
+#    - 숫자도 '.......'도 없는 문장: 포함.
+#
+# 최종적으로 제외되는 경우는 두 가지:
+#    A. 정제 길이 <= 10
+#    B. 정제 길이 11~19 이면서 '.......' 포함
+#
+# 요약: 짧은 문장을 걸러내고(정제 길이 ≤10), 점선(".......")으로만 이루어지거나 망설임 성격의 짧은 문장은 더 엄격히 배제한다(정제 길이 11~19).
+########################################################
 
-print("original begin:",begin,"end:",end)
+preprocessing_array = []
 
-print("keyword_sentence_id:", keyword_sentence_id)
-print("begin_id:", begin_id)
-print("end_id:", end_id)
+for index in range(get_index_from_id(begin_id), get_index_from_id(end_id) + 1):
+    conv = sample_inp["conversation"][index]
+    utterance = conv["utterance"]
 
-print(ids)
+    speaker_same_as_previous = False
+    
+    if len(preprocessing_array) > 0:
+        previous_conv_speaker = preprocessing_array[-1].split(": ")[0]
+        if conv["speaker"] == previous_conv_speaker:
+            speaker_same_as_previous = True
+
+    # 필터 규칙: 정제 길이 > 10을 통과한 뒤
+    #  - 숫자가 있으면 포함
+    #  - '.......'이 있으면 정제 길이 >= 20일 때만 포함
+    #  - 둘 다 없으면 포함
+
+    # print(speaker_same_as_previous, len(preprocessing_array))
+
+    filter_utterance = "".join("".join(utterance.split(" ")).split("."))
+    speaker_and_utterance = (" " if speaker_same_as_previous else conv["speaker"] + ": ") + conv["utterance"]
+    speaker_and_utterance = speaker_and_utterance.replace("......", "<REMOVE_DOTS>")
+    
+    if len(filter_utterance) > 10:
+        has_digit = any(char.isdigit() for char in utterance)
+        has_dots = "......." in utterance
+
+        if has_digit:
+            if speaker_same_as_previous:
+                preprocessing_array[-1] += speaker_and_utterance
+            else:
+                preprocessing_array.append(speaker_and_utterance)
+        elif not has_digit:
+            if has_dots:
+                if len(filter_utterance) >= 20:
+                    if speaker_same_as_previous:
+                        preprocessing_array[-1] += speaker_and_utterance
+                    else:
+                        preprocessing_array.append(speaker_and_utterance)
+            else:
+                if speaker_same_as_previous:
+                    preprocessing_array[-1] += speaker_and_utterance
+                else:
+                    preprocessing_array.append(speaker_and_utterance)
+
+# print("keyword_sentence_id:", keyword_sentence_id)
+# print("begin_id:", begin_id)
+# print("end_id:", end_id)
+
+###############################################
+# 비-분할 입력 생성
+###############################################
+
+# FINAL_INPUT = PROMPT + "\n".join(preprocessing_array)
+# print(FINAL_INPUT)
+
+###################################################
+# 분할 입력 생성
+###################################################
+
+FINAL_INPUT = []
+
+for chunk in make_chunk_index_list(preprocessing_array, MAX_CHUNK_LEN):
+    chunk_text = "\n".join([preprocessing_array[i] for i in chunk])
+    prompt_with_chunk = PROMPT + chunk_text
+    print("----- CHUNK START -----")
+    print(prompt_with_chunk)
+    print("----- CHUNK END -----\n\n")
+
+    FINAL_INPUT.append(prompt_with_chunk)
+
