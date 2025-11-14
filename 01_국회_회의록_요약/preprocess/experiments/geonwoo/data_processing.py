@@ -220,14 +220,13 @@ for index in range(get_index_from_id(begin_id), get_index_from_id(end_id) + 1):
 # 분할 입력 생성
 ###################################################
 
-FINAL_INPUT = []
+FINAL_INPUT = [PROMPT]
 
 for chunk in make_chunk_index_list(preprocessing_array, MAX_CHUNK_LEN):
     chunk_text = "\n".join([preprocessing_array[i] for i in chunk])
-    prompt_with_chunk = PROMPT + chunk_text
     print("----- CHUNK START -----")
-    print(prompt_with_chunk)
+    print(chunk_text)
     print("----- CHUNK END -----\n\n")
 
-    FINAL_INPUT.append(prompt_with_chunk)
+    FINAL_INPUT.append(chunk_text)
 
