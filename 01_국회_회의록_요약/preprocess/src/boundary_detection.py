@@ -3,21 +3,16 @@
 """
 
 import re
-import os
 import logging
 from typing import Dict, List, Optional, Tuple
 
 try:
     from .config import (
-        NEXT_AGENDA_PATTERNS, PROCLAMATION_PATTERNS, FALLBACK_AGENDA_LENGTH,
-        MAX_AGENDA_LENGTH, DECISION_KEYWORDS, FINAL_DECISION_PATTERNS,
-        INTERMEDIATE_DECISION_PATTERNS, QUESTION_PATTERNS, SUPPLEMENTARY_PATTERNS
+        PROCLAMATION_PATTERNS, FALLBACK_AGENDA_LENGTH, MAX_AGENDA_LENGTH
     )
 except ImportError:
     from config import (
-        NEXT_AGENDA_PATTERNS, PROCLAMATION_PATTERNS, FALLBACK_AGENDA_LENGTH,
-        MAX_AGENDA_LENGTH, DECISION_KEYWORDS, FINAL_DECISION_PATTERNS,
-        INTERMEDIATE_DECISION_PATTERNS, QUESTION_PATTERNS, SUPPLEMENTARY_PATTERNS
+        PROCLAMATION_PATTERNS, FALLBACK_AGENDA_LENGTH, MAX_AGENDA_LENGTH
     )
 
 logger = logging.getLogger(__name__)
@@ -25,50 +20,130 @@ logger = logging.getLogger(__name__)
 
 def find_next_agenda_start(
     dialogue: List[Dict],
-    start_idx: int,
-    current_keyword: Optional[str] = None
+    start_idx: int
 ) -> Optional[int]:
     """
-    다음 안건의 시작점을 찾습니다.
+    다음 안건이 시작되는 위치를 찾는 함수입니다.
+    
+    예를 들어, 지금 안건이 "의사일정 제1항"이라면
+    "의사일정 제2항"이 나오는 위치를 찾는 것입니다.
+    
+    어떻게 찾나요?
+    1. "의사일정 제N항"이라는 말이 나오고
+    2. "상정"이라는 말이 있으면 → 무조건 다음 안건!
+    3. "상정"이 없어도 → "의결", "가결", "부결" 같은 결정 관련 말이 없으면 → 다음 안건!
     
     Args:
-        dialogue: 대화 리스트
-        start_idx: 현재 안건 시작점
-        current_keyword: 현재 안건 키워드 (제외용)
+        dialogue: 전체 대화 내용 (발화 리스트)
+        start_idx: 지금 안건이 시작된 위치
     
     Returns:
-        다음 안건 시작점 인덱스 (없으면 None)
+        다음 안건이 시작되는 위치 (없으면 None)
     """
+    next_agenda_pattern = r'의사일정\s*제\d+항'
+    exclude_keywords = r'의결|가결|부결|결론|회부|부터|까지|내지'
+    
     for i in range(start_idx + 1, len(dialogue)):
         utterance = dialogue[i].get('utterance', '')
-        for pattern in NEXT_AGENDA_PATTERNS:
-            if re.search(pattern, utterance):
-                # 현재 안건 키워드가 포함되지 않았는지 확인
-                if current_keyword and current_keyword in utterance:
-                    continue
-                # "다음 제N항부터 제M항까지" 같은 패턴은 현재 안건의 연속이므로 제외
-                if re.search(r'다음\s*제\d+항\s*부터', utterance):
-                    continue
-                # "다음 의사일정 제N항" 패턴이 "의결", "가결", "결론", "회부" 등과 함께 있으면 현재 안건의 결정이므로 제외
-                if re.search(r'다음.*의사일정.*제\d+항', utterance):
-                    if re.search(r'의결|가결|부결|결론|회부|의결코자|가결하고자|부결하고자', utterance):
-                        continue
-                # "의사일정 제N항을 상정합니다" 같은 패턴만 다음 안건으로 인정
-                if re.search(r'의사일정\s*제\d+항.*상정', utterance):
-                    return i
-                # "의사일정 제N항" 패턴이 있고 "상정"이 없으면 현재 안건의 연속일 수 있으므로 확인
-                if re.search(r'의사일정\s*제\d+항', utterance) and not re.search(r'상정', utterance):
-                    # "다음"이 앞에 있고 "의결", "가결", "결론" 등이 없으면 다음 안건으로 인정
-                    if re.search(r'다음.*의사일정\s*제\d+항', utterance):
-                        if not re.search(r'의결|가결|부결|결론|회부|의결코자|가결하고자|부결하고자', utterance):
-                            return i
-                        else:
-                            continue
-                    # "의사일정 제N항"만 있고 "부터", "까지" 같은 연속 표현이 없으면 다음 안건으로 인정
-                    if not re.search(r'부터|까지|내지', utterance):
-                        return i
-                # 기타 패턴은 다음 안건으로 인정
+        if re.search(next_agenda_pattern, utterance):
+            # 상정 포함이면 무조건 인정
+            if re.search(r'상정', utterance):
                 return i
+            # 제외 키워드 없으면 인정
+            if not re.search(exclude_keywords, utterance):
+                return i
+    
+    return None
+
+
+def find_agenda_end(
+    dialogue: List[Dict],
+    start_idx: int
+) -> Optional[int]:
+    """
+    안건이 끝났다는 말을 찾는 함수입니다 (회의 종료와 구분).
+    
+    안건별 종료 패턴:
+    - "이상 보고를 마치겠습니다" → 안건 보고 끝!
+    - "이상 보고 마치겠습니다" → 안건 보고 끝!
+    - "심사를 마쳤습니다" → 안건 심사 끝!
+    - "이상으로 마치겠습니다" → 안건 마무리!
+    
+    Args:
+        dialogue: 전체 대화 내용 (발화 리스트)
+        start_idx: 지금 안건이 시작된 위치
+    
+    Returns:
+        안건 종료 문장이 나온 위치 (없으면 None)
+    """
+    agenda_end_patterns = [
+        r'이상\s*(?:보고를|보고)\s*마치겠습니다',  # "이상 보고를 마치겠습니다"
+        r'이상\s*보고를\s*마치겠습니다',  # "이상 보고를 마치겠습니다" (공백 없음)
+        r'이상\s*보고\s*마치겠습니다',  # "이상 보고 마치겠습니다"
+        r'보고를\s*마치겠습니다',  # "보고를 마치겠습니다"
+        r'보고\s*마치겠습니다',  # "보고 마치겠습니다"
+        r'심사를\s*마쳤습니다',  # "심사를 마쳤습니다"
+        r'심의를\s*마치겠습니다',  # "심의를 마치겠습니다" (예시 4에서 발견)
+        r'이상으로\s*(?:.*\s*)?마치겠습니다',  # "이상으로 마치겠습니다"
+        r'이상\s*(?:.*\s*)?마치겠습니다',  # "이상 마치겠습니다"
+    ]
+    
+    for i in range(start_idx + 1, len(dialogue)):
+        utterance = dialogue[i].get('utterance', '')
+        # 회의 종료 패턴은 제외 (산회, 회의 종료 등)
+        if re.search(r'산회|회의.*종료|회의.*마치', utterance):
+            continue
+        
+        # 안건별 종료 패턴 확인 (더 유연한 매칭)
+        # 발화에 패턴이 포함되어 있으면 안건 종료로 판단
+        for pattern in agenda_end_patterns:
+            if re.search(pattern, utterance):
+                return i
+        
+        # 추가: "보고를 마치겠습니다" 같은 패턴이 발화 중간에 있어도 매칭
+        # (예: "이상으로 보고를 마치겠습니다" 같은 변형)
+        if re.search(r'보고.*마치겠습니다|마치겠습니다.*보고', utterance):
+            return i
+    
+    return None
+
+
+def find_meeting_end(
+    dialogue: List[Dict],
+    start_idx: int
+) -> Optional[int]:
+    """
+    회의가 끝났다는 말을 찾는 함수입니다.
+    
+    예를 들어:
+    - "산회하도록 하겠습니다" → 회의 끝!
+    - "오늘 회의는 여기서 마치겠습니다" → 회의 끝!
+    - "끝냅시다" → 회의 끝!
+    
+    이런 말들이 나오면 그 위치를 알려줍니다.
+    
+    Args:
+        dialogue: 전체 대화 내용 (발화 리스트)
+        start_idx: 지금 안건이 시작된 위치
+    
+    Returns:
+        회의 종료 문장이 나온 위치 (없으면 None)
+    """
+    end_patterns = [
+        r'산회',
+        r'종료',
+        r'회의.*종료',
+        r'회의.*마치',
+        r'회의.*끝',
+        r'이것으로.*끝',
+        r'이것으로.*마치',
+        r'이것으로.*종료'
+    ]
+    
+    for i in range(start_idx + 1, len(dialogue)):
+        utterance = dialogue[i].get('utterance', '')
+        if any(re.search(pattern, utterance) for pattern in end_patterns):
+            return i
     
     return None
 
@@ -78,23 +153,56 @@ def find_proclamation_sentences(
     exclude_adjournment: bool = True
 ) -> List[int]:
     """
-    선포 문장의 인덱스를 찾습니다.
+    결정을 선포하는 문장을 찾는 함수입니다.
+    
+    결정 발화는 안건의 최종 결정을 나타내는 발화입니다.
+    하지만 모든 안건에 결정 발화가 있는 것은 아닙니다 (36.5%만 해당).
+    
+    우선순위 1: 명확한 선포 패턴 (가장 확실)
+    - "가결되었음을 선포합니다" → 가결 결정!
+    - "부결되었음을 선포합니다" → 부결 결정!
+    - "의결되었음을 선포합니다" → 의결 결정!
+    
+    우선순위 2: 완료 표현
+    - "가결되었습니다" → 가결 완료!
+    - "부결되었습니다" → 부결 완료!
+    - "의결되었습니다" → 의결 완료!
+    - "통과되었습니다" → 통과 완료!
+    
+    우선순위 3: 유보/회부 결정
+    - "유보하도록 하겠습니다" → 유보 결정!
+    - "상임위로 회부" → 상임위 회부 결정!
+    - "종결하고 의결" → 종결 의결!
+    
+    제외 조건:
+    - "이의 없습니까?" 같은 질문은 제외 (질문은 결정이 아님)
+    - "산회를 선포합니다"는 회의 종료이므로 제외
     
     Args:
-        dialogue: 대화 리스트
-        exclude_adjournment: 산회 선포 제외 여부
+        dialogue: 전체 대화 내용 (발화 리스트)
+        exclude_adjournment: True면 "산회 선포"는 제외 (기본값: True)
     
     Returns:
-        선포 문장 인덱스 리스트
+        결정 선포 문장이 나온 위치들의 리스트
     """
     proclamation_indices = []
     for i, utterance_obj in enumerate(dialogue):
         utterance = utterance_obj.get('utterance', '')
         
-        # 산회 선포 제외
+        # 산회 선포 제외 (회의 종료이므로)
         if exclude_adjournment and '산회' in utterance:
             continue
         
+        # 질문 패턴 제외 (질문은 결정이 아님)
+        if re.search(r'이의\s*없습니까|이의\s*없으시지요', utterance):
+            continue
+        
+        # 안건 종료 패턴 제외 (안건 종료는 결정이 아님, 3.5순위에서 별도 처리)
+        # "이상 보고를 마치겠습니다", "보고를 마치겠습니다" 등은 안건 종료이지 결정이 아님
+        if re.search(r'이상\s*(?:보고를|보고)\s*마치겠습니다|보고를\s*마치겠습니다|보고\s*마치겠습니다|심사를\s*마쳤습니다|심의를\s*마치겠습니다', utterance):
+            continue
+        
+        # 결정 패턴 확인
         for pattern in PROCLAMATION_PATTERNS:
             if re.search(pattern, utterance):
                 proclamation_indices.append(i)
@@ -103,343 +211,157 @@ def find_proclamation_sentences(
     return proclamation_indices
 
 
-def find_decision_with_llm(
-    dialogue_segment: List[Dict],
-    start_idx: int,
-    end_idx: int
-) -> Optional[int]:
-    """
-    LLM을 사용하여 결정 발화를 찾습니다.
-    
-    Args:
-        dialogue_segment: 대화 세그먼트 (start_idx부터 end_idx까지)
-        start_idx: 시작 인덱스 (원본 dialogue 기준)
-        end_idx: 종료 인덱스 (원본 dialogue 기준)
-    
-    Returns:
-        결정 발화의 인덱스 (원본 dialogue 기준, 없으면 None)
-    """
-    try:
-        # OpenAI API 키 확인
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            logger.warning("OPENAI_API_KEY가 설정되지 않음. 룰베이스로 대체합니다.")
-            return None
-        
-        # OpenAI 클라이언트 초기화
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-        except ImportError:
-            logger.warning("openai 패키지가 설치되지 않음. 룰베이스로 대체합니다.")
-            return None
-        
-        # 발화 텍스트 준비 (토큰 제한 고려: 마지막 100개 발화만 포함)
-        max_utterances = 100
-        if len(dialogue_segment) > max_utterances:
-            dialogue_segment = dialogue_segment[-max_utterances:]
-            start_idx = end_idx - max_utterances
-        
-        utterances_text = "\n".join([
-            f"[{i+start_idx}] [{utt.get('role', '비지정')}] {utt.get('speaker', '')}: {utt.get('utterance', '')[:300]}"
-            for i, utt in enumerate(dialogue_segment)
-        ])
-        
-        # 프롬프트 구성
-        system_prompt = """국회 회의록에서 안건 결정 발화를 찾아주세요.
-규칙:
-1. 소위원장 또는 위원장이 내린 결정만 인정
-2. 질문("이의 없습니까?" 등)은 결정이 아님
-3. 결정 패턴: "가결되었음을 선포", "부결되었습니다", "상임위로 다시 회부", "유보하도록 하겠습니다", "종결 짓겠습니다" 등
-4. 여러 결정이 있으면 가장 마지막 결정의 인덱스를 반환
-5. 결정이 없으면 -1 반환
-응답 형식: 숫자만 (예: 123 또는 -1)"""
-
-        user_prompt = f"""다음 발화 목록에서 안건에 대한 결정 발화를 찾아주세요. 가장 마지막 결정 발화의 인덱스를 반환하세요.
-
-{utterances_text}
-
-결정 발화 인덱스 (없으면 -1):"""
-        
-        # OpenAI API 호출
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=20
-        )
-        
-        # 응답 파싱
-        response_text = response.choices[0].message.content.strip()
-        match = re.search(r'-?\d+', response_text)
-        if match:
-            decision_idx = int(match.group())
-            
-            if decision_idx == -1:
-                return None
-            
-            # 인덱스 범위 검증
-            if start_idx <= decision_idx < end_idx:
-                logger.info(f"LLM이 결정 발화 인덱스 {decision_idx} 발견 (범위: [{start_idx}, {end_idx}))")
-                return decision_idx
-            elif 0 <= decision_idx < len(dialogue_segment):
-                adjusted_idx = start_idx + decision_idx
-                if start_idx <= adjusted_idx < end_idx:
-                    logger.info(f"LLM이 결정 발화 인덱스 {decision_idx} (dialogue_segment 기준) -> {adjusted_idx} (원본 dialogue 기준) 발견")
-                    return adjusted_idx
-                else:
-                    logger.warning(f"인덱스 변환 후 범위 벗어남: {decision_idx} -> {adjusted_idx} (범위: [{start_idx}, {end_idx}))")
-                    return None
-            else:
-                logger.warning(f"LLM이 반환한 인덱스 {decision_idx}가 범위를 벗어남 (범위: [{start_idx}, {end_idx}))")
-                return None
-        else:
-            logger.warning(f"LLM 응답에서 숫자를 찾을 수 없음: {response_text}")
-            return None
-            
-    except Exception as e:
-        logger.warning(f"LLM을 사용한 결정 탐색 실패: {e}")
-        return None
-
-
-def _find_decisions_in_range(
-    dialogue: List[Dict],
-    start_idx: int,
-    end_idx: int
-) -> List[Tuple[int, int]]:
-    """
-    지정된 범위에서 결정 후보를 찾습니다.
-    
-    Returns:
-        (인덱스, 우선순위) 튜플 리스트
-    """
-    decision_candidates = []
-    question_indices = []
-    
-    for i in range(start_idx, end_idx):
-        utterance = dialogue[i].get('utterance', '')
-        
-        # 질문 패턴 제외
-        is_question = any(re.search(pattern, utterance) for pattern in QUESTION_PATTERNS)
-        if is_question:
-            question_indices.append(i)
-            continue
-        
-        if any(kw in utterance for kw in DECISION_KEYWORDS):
-            # 1순위 패턴 확인
-            for pattern in FINAL_DECISION_PATTERNS:
-                if re.search(pattern, utterance):
-                    decision_candidates.append((i, 1))
-                    break
-            else:
-                # 2순위 패턴 확인
-                for pattern in INTERMEDIATE_DECISION_PATTERNS:
-                    if re.search(pattern, utterance):
-                        decision_candidates.append((i, 2))
-                        break
-    
-    # 질문 다음의 결정 찾기
-    if question_indices:
-        for question_idx in reversed(question_indices):
-            if question_idx >= end_idx:
-                continue
-            for j in range(question_idx + 1, min(question_idx + 3, end_idx)):
-                next_utterance = dialogue[j].get('utterance', '')
-                if any(kw in next_utterance for kw in DECISION_KEYWORDS):
-                    for pattern in FINAL_DECISION_PATTERNS:
-                        if re.search(pattern, next_utterance):
-                            decision_candidates.append((j, 1))
-                            break
-                    if any(c[0] == j and c[1] == 1 for c in decision_candidates):
-                        break
-                if any(c[0] > question_idx and c[1] == 1 for c in decision_candidates):
-                    break
-    
-    return decision_candidates
-
-
 def extract_agenda_boundaries(
     dialogue: List[Dict],
     sentence_id: Optional[str] = None,
-    keyword: Optional[str] = None,
-    begin: Optional[int] = None,
-    end: Optional[int] = None,
-    role_map: Optional[Dict[str, str]] = None
+    next_sentence_id: Optional[str] = None
 ) -> Tuple[int, int]:
     """
-    안건의 시작과 끝 인덱스를 찾습니다.
+    하나의 안건이 어디서 시작하고 어디서 끝나는지 찾는 함수입니다.
     
-    우선순위:
-    1. 다음 안건 시작점 ("의사일정 제N항" 패턴)
-    2. 선포 문장 ("가결되었음을 선포합니다", 산회 제외)
-    3. 범위 제한 (FALLBACK_AGENDA_LENGTH)
+    예를 들어, 전체 대화가 100개 발화가 있다면:
+    - 안건 1: 발화 10번부터 50번까지
+    - 안건 2: 발화 50번부터 80번까지
+    - 안건 3: 발화 80번부터 100번까지
+    
+    이렇게 안건의 시작점과 끝점을 찾아줍니다.
+    
+    시작점 찾기:
+    - sentence_id라는 고유 번호로 시작 발화를 찾습니다.
+    
+    끝점 찾기 (우선순위 순서대로):
+    1순위: 같은 회의에 다음 안건이 있으면 → 그 다음 안건의 시작점이 지금 안건의 끝점!
+    
+    2순위: "의사일정 제N항"이라는 말이 나오면 → 다음 안건이 시작되는 곳!
+           (예: "의사일정 제2항을 상정합니다")
+    
+    3순위: "가결되었음을 선포합니다" 같은 결정 선포 문장이 나오면 → 그게 끝점!
+    
+    3.5순위: "이상 보고를 마치겠습니다" 같은 안건별 종료 문장이 나오면 → 그게 끝점!
+            (회의 종료와 구분하여 안건만 종료되는 경우 처리)
+    
+    4순위: "산회하도록 하겠습니다" 같은 회의 종료 문장이 나오면 → 그게 끝점!
+    
+    5순위: 위 방법들로 못 찾으면 → 기본값으로 50개 발화만 사용
     
     Args:
-        dialogue: 대화 리스트
-        sentence_id: 안건 시작점 ID
-        keyword: 안건 키워드
-        begin: 시작 인덱스 (무시됨)
-        end: 종료 인덱스 (무시됨)
-        role_map: 발화자 역할 매핑
+        dialogue: 전체 대화 내용 (발화 리스트)
+        sentence_id: 안건이 시작되는 발화의 고유 번호
+        next_sentence_id: 같은 회의에서 다음 안건의 시작 발화 고유 번호 (있으면 최우선 사용!)
     
     Returns:
-        (start_idx, end_idx) 튜플
+        (시작점, 끝점) 튜플
+        예: (10, 50) → 발화 10번부터 50번까지가 이 안건
     """
-    # sentence_id로 시작점 찾기
+    # 1단계: 시작점 찾기
+    # sentence_id라는 고유 번호로 안건이 시작되는 발화를 찾습니다.
     start_idx = 0
     if sentence_id:
         for i, utterance_obj in enumerate(dialogue):
             if utterance_obj.get('id') == sentence_id:
-                start_idx = i
+                start_idx = i  # 찾았습니다! 이게 시작점!
                 break
         else:
-            logger.warning(f"sentence_id '{sentence_id}'를 찾을 수 없음. keyword로 시작점 탐색.")
-            if keyword:
-                for i, utterance_obj in enumerate(dialogue):
-                    if keyword in utterance_obj.get('utterance', ''):
-                        start_idx = i
-                        break
-    elif keyword:
-        for i, utterance_obj in enumerate(dialogue):
-            if keyword in utterance_obj.get('utterance', ''):
-                start_idx = i
-                break
+            # 못 찾았으면 경고 메시지 출력하고 처음부터 시작
+            logger.warning(f"sentence_id '{sentence_id}'를 찾을 수 없음. start_idx=0으로 설정.")
+    else:
+        logger.warning(f"sentence_id가 없음. start_idx=0으로 설정.")
     
-    # sentence_id가 없고 keyword로 찾은 경우에만 이전 맥락 포함
-    original_start_idx = start_idx
-    if start_idx > 0 and not sentence_id:
-        prev_proclamation_indices = find_proclamation_sentences(dialogue[:start_idx], exclude_adjournment=True)
-        if prev_proclamation_indices:
-            prev_proc_idx = prev_proclamation_indices[-1]
-            context_start = prev_proc_idx + 1
-            if context_start < start_idx:
-                start_idx = context_start
-                logger.debug(f"이전 선포 문장({prev_proc_idx}) 이후 맥락 포함: start_idx 조정 {original_start_idx} -> {start_idx}")
-    
+    # 일단 끝점은 전체 대화의 마지막으로 설정 (나중에 더 정확한 위치로 바꿀 예정)
     end_idx = len(dialogue)
     
-    # 1순위: 다음 안건 시작점 찾기
-    next_agenda_idx = find_next_agenda_start(dialogue, start_idx, keyword)
+    # 2단계: 끝점 찾기 (우선순위 순서대로 시도)
+    
+    # 1순위: 같은 회의에 다음 안건이 있으면 → 그게 가장 정확!
+    if next_sentence_id:
+        for i, utterance_obj in enumerate(dialogue):
+            if utterance_obj.get('id') == next_sentence_id:
+                end_idx = i  # 다음 안건이 시작되는 곳이 지금 안건의 끝!
+                logger.debug(f"다음 샘플의 sentence_id로 end_idx 찾음: {end_idx}")
+                return start_idx, end_idx  # 찾았으니 바로 반환!
+    
+    # 2순위: "의사일정 제N항" 패턴 찾기
+    next_agenda_idx = find_next_agenda_start(dialogue, start_idx)
     if next_agenda_idx:
-        # 결정은 반드시 next_agenda_idx 이전에 있어야 함
-        search_end = next_agenda_idx
-        decision_candidates = _find_decisions_in_range(
-            dialogue,
-            max(start_idx, next_agenda_idx - 200),
-            search_end
-        )
-        
-        if decision_candidates:
-            priority_1_decisions = [c for c in decision_candidates if c[1] == 1]
-            if priority_1_decisions:
-                decision_idx = max(priority_1_decisions, key=lambda x: x[0])[0]
-            else:
-                decision_idx = max(decision_candidates, key=lambda x: x[0])[0]
-            
-            if decision_idx >= next_agenda_idx:
-                end_idx = next_agenda_idx
-                logger.warning(f"결정({decision_idx})이 다음 안건 시작점({next_agenda_idx}) 이후에 있어 제외")
-            else:
-                # 결정 이후 부연 설명 확인
-                has_supplementary = False
-                for i in range(decision_idx + 1, min(decision_idx + 3, next_agenda_idx)):
-                    utterance = dialogue[i].get('utterance', '')
-                    if any(re.search(pattern, utterance) for pattern in SUPPLEMENTARY_PATTERNS):
-                        has_supplementary = True
-                        break
-                
-                end_idx = decision_idx + 1
-                if has_supplementary:
-                    logger.debug(f"결정({decision_idx}) 이후 부연 설명 발견")
-        else:
-            # LLM으로 결정 찾기
-            dialogue_segment = []
-            for i in range(start_idx, next_agenda_idx):
-                utt = dialogue[i].copy()
-                speaker_raw = utt.get('speaker', '')
-                if role_map is not None:
-                    role = role_map.get(speaker_raw, '비지정')
-                    utt['role'] = role
-                else:
-                    utt['role'] = '비지정'
-                dialogue_segment.append(utt)
-            
-            llm_decision_idx = find_decision_with_llm(dialogue_segment, start_idx, next_agenda_idx)
-            
-            if llm_decision_idx is not None:
-                end_idx = llm_decision_idx + 1
-                logger.info(f"LLM이 결정({llm_decision_idx}) 발견: end_idx 조정 {next_agenda_idx} -> {end_idx}")
-            else:
-                end_idx = next_agenda_idx
-                logger.debug(f"룰베이스 및 LLM으로 결정을 찾지 못함: end_idx = {next_agenda_idx}")
+        end_idx = next_agenda_idx  # 다음 안건이 시작되는 곳!
+        logger.debug(f"다음 안건 패턴으로 end_idx 찾음: {end_idx}")
     
-    # 2순위: 다음 안건 시작점이 없을 때 결정 찾기
-    if end_idx == len(dialogue):
-        decision_candidates = _find_decisions_in_range(dialogue, start_idx, len(dialogue))
-        
-        if decision_candidates:
-            priority_1_decisions = [c for c in decision_candidates if c[1] == 1]
-            if priority_1_decisions:
-                decision_idx = max(priority_1_decisions, key=lambda x: x[0])[0]
-            else:
-                decision_idx = max(decision_candidates, key=lambda x: x[0])[0]
-            end_idx = decision_idx + 1
-            logger.debug(f"결정({decision_idx}) 발견 (다음 안건 시작점 없음)")
-    
-    # 3순위: 선포 문장 찾기
-    if end_idx == len(dialogue):
+    # 3순위: 결정 선포 문장 찾기 ("가결되었음을 선포합니다" 등)
+    if end_idx == len(dialogue):  # 아직 끝점을 못 찾았으면
         proclamation_indices = find_proclamation_sentences(dialogue, exclude_adjournment=True)
         for proc_idx in proclamation_indices:
-            if proc_idx > start_idx:
-                end_idx = proc_idx + 1
+            if proc_idx > start_idx:  # 시작점보다 뒤에 있어야 함
+                end_idx = proc_idx + 1  # 선포 문장 다음이 끝점!
                 logger.debug(f"선포 문장 발견: {proc_idx}")
                 break
     
-    # 4순위: 범위 제한
-    if end_idx == len(dialogue):
-        if len(dialogue) > 0:
-            last_utterance = dialogue[-1].get('utterance', '')
-            if '산회' in last_utterance and '선포' in last_utterance:
-                end_idx = len(dialogue) - 1
-                logger.debug(f"'산회를 선포합니다' 발견: end_idx 조정")
-        
-        if end_idx == len(dialogue):
-            logger.warning(f"다음 안건 시작점과 선포 문장을 찾지 못함. sentence_id 이후 {FALLBACK_AGENDA_LENGTH}개 발화 사용.")
-            end_idx = min(start_idx + FALLBACK_AGENDA_LENGTH, len(dialogue))
+    # 3.5순위: 안건별 종료 문장 찾기 ("이상 보고를 마치겠습니다" 등)
+    # 회의 종료와 구분하여 안건만 종료되는 경우 처리
+    agenda_end_used_flag = False  # agenda_end가 사용되었는지 추적 (MAX_AGENDA_LENGTH 제한 방지용)
+    if end_idx == len(dialogue):  # 아직 끝점을 못 찾았으면
+        agenda_end_idx = find_agenda_end(dialogue, start_idx)
+        if agenda_end_idx:
+            fallback_limit = start_idx + FALLBACK_AGENDA_LENGTH
+            # agenda_end_idx가 Fallback 범위 내에 있으면 사용 (더 정확한 경계)
+            if agenda_end_idx <= fallback_limit:
+                end_idx = agenda_end_idx + 1
+                agenda_end_used_flag = True
+                logger.debug(f"안건 종료 문장 발견: {agenda_end_idx} (start_idx={start_idx}, fallback_limit={fallback_limit})")
+            else:
+                # 너무 멀리 있으면 무시 (다른 안건의 종료일 수 있음)
+                logger.debug(f"안건 종료 문장 발견했지만 너무 멀어서 무시: {agenda_end_idx} (start_idx={start_idx}, fallback_limit={fallback_limit})")
+        else:
+            logger.debug(f"안건 종료 문장을 찾지 못함 (start_idx={start_idx})")
     
-    # 안전장치
+    # 4순위: 회의 종료 문장 찾기 ("산회하도록 하겠습니다" 등)
+    if end_idx == len(dialogue):  # 아직 끝점을 못 찾았으면
+        meeting_end_idx = find_meeting_end(dialogue, start_idx)
+        if meeting_end_idx:
+            end_idx = meeting_end_idx + 1  # 회의 종료 문장 다음이 끝점!
+            logger.debug(f"회의 종료 문장 발견: {meeting_end_idx}")
+    
+    # 5순위: 위 방법들로 못 찾으면 → 기본값으로 50개 발화만 사용
+    if end_idx == len(dialogue):
+        logger.warning(f"안건 경계를 찾지 못함. sentence_id 이후 {FALLBACK_AGENDA_LENGTH}개 발화 사용.")
+        end_idx = min(start_idx + FALLBACK_AGENDA_LENGTH, len(dialogue))
+        # Fallback 사용 전에 한 번 더 agenda_end 체크 (3.5순위에서 놓친 경우 대비)
+        if not agenda_end_used_flag:
+            agenda_end_idx = find_agenda_end(dialogue, start_idx)
+            if agenda_end_idx and agenda_end_idx < end_idx:
+                end_idx = agenda_end_idx + 1
+                agenda_end_used_flag = True
+                logger.debug(f"Fallback 전에 안건 종료 문장 발견: {agenda_end_idx}")
+    
+    # 안전장치: 끝점이 시작점보다 앞에 있으면 안 됨!
     if end_idx <= start_idx:
         logger.warning(f"end_idx({end_idx})가 start_idx({start_idx})보다 작거나 같음. 수정 중...")
         end_idx = min(start_idx + FALLBACK_AGENDA_LENGTH, len(dialogue))
         if end_idx <= start_idx:
-            end_idx = len(dialogue)
+            end_idx = len(dialogue)  # 그래도 안 되면 전체 대화 끝까지
     
-    # MAX_AGENDA_LENGTH 제한 (결정이 있으면 완화)
+    # 안건이 너무 길면 최대 100개 발화로 제한
+    # 단, agenda_end나 meeting_end로 찾은 경우는 제한하지 않음 (정확한 경계이므로)
     if end_idx - start_idx > MAX_AGENDA_LENGTH:
-        decision_candidates_check = _find_decisions_in_range(
-            dialogue,
-            start_idx,
-            min(start_idx + MAX_AGENDA_LENGTH + 50, len(dialogue))
-        )
+        # meeting_end로 찾았는지 확인
+        meeting_end_used = False
+        if end_idx < len(dialogue):
+            meeting_end_idx = find_meeting_end(dialogue, start_idx)
+            if meeting_end_idx and end_idx == meeting_end_idx + 1:
+                meeting_end_used = True
         
-        if decision_candidates_check:
-            priority_1_decisions = [c for c in decision_candidates_check if c[1] == 1]
-            if priority_1_decisions:
-                last_decision_idx = max(priority_1_decisions, key=lambda x: x[0])[0]
-            else:
-                last_decision_idx = max(decision_candidates_check, key=lambda x: x[0])[0]
-            
-            if last_decision_idx is not None:
-                end_idx = min(last_decision_idx + 1, len(dialogue))
-                logger.debug(f"결정 발견으로 MAX_AGENDA_LENGTH 제한 완화: 결정 위치 {last_decision_idx}")
+        # agenda_end나 meeting_end로 찾지 않았으면 MAX_AGENDA_LENGTH 제한 적용
+        # 단, 제한 적용 전에 한 번 더 agenda_end 체크 (놓친 경우 대비)
+        if not agenda_end_used_flag and not meeting_end_used:
+            agenda_end_idx = find_agenda_end(dialogue, start_idx)
+            if agenda_end_idx and agenda_end_idx < end_idx:
+                end_idx = agenda_end_idx + 1
+                agenda_end_used_flag = True
+                logger.debug(f"MAX_AGENDA_LENGTH 제한 전에 안건 종료 문장 발견: {agenda_end_idx}")
             else:
                 end_idx = min(start_idx + MAX_AGENDA_LENGTH, len(dialogue))
-        else:
-            end_idx = min(start_idx + MAX_AGENDA_LENGTH, len(dialogue))
+                logger.debug(f"MAX_AGENDA_LENGTH 제한으로 end_idx 조정: {end_idx}")
     
+    # 마지막으로 대화 길이를 넘지 않도록 확인
     end_idx = min(end_idx, len(dialogue))
     
     return start_idx, end_idx

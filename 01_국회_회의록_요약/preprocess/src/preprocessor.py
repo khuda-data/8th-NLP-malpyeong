@@ -1,5 +1,12 @@
 """
 메인 전처리 파이프라인 모듈
+
+전처리 프로세스:
+1. 안건 경계 탐지: sentence_id를 기준으로 안건의 시작과 끝을 찾음
+2. 발화 정제: 불필요한 발화 제거 및 정제
+3. 태깅 적용: <결정>, <안건>, <쟁점>, <IMP> 태그 적용
+4. 반복 발화 제거: 유사한 발화 중복 제거
+5. 중요도 태깅: 규칙 기반으로 중요 발화에 <IMP> 태그 추가
 """
 
 import re
@@ -10,14 +17,14 @@ try:
     from .config import MIN_UTTERANCE_LENGTH_STRICT
     from .utils import normalize_speaker_name, map_speaker_roles
     from .boundary_detection import extract_agenda_boundaries
-    from .filtering import clean_utterance, filter_utterances_by_keyword
-    from .tagging import extract_key_information, apply_tags, apply_importance_tags
+    from .filtering import clean_utterance
+    from .tagging import apply_tags, apply_importance_tags
 except ImportError:
     from config import MIN_UTTERANCE_LENGTH_STRICT
     from utils import normalize_speaker_name, map_speaker_roles
     from boundary_detection import extract_agenda_boundaries
-    from filtering import clean_utterance, filter_utterances_by_keyword
-    from tagging import extract_key_information, apply_tags, apply_importance_tags
+    from filtering import clean_utterance
+    from tagging import apply_tags, apply_importance_tags
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +37,18 @@ def remove_duplicate_utterances(
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     반복 발화를 제거합니다.
+    
+    유사도 기반으로 중복 발화를 찾아 제거합니다.
+    단어 집합의 교집합 비율로 유사도를 계산합니다.
+    
+    Args:
+        preprocessed_lines: 전처리된 발화 라인 리스트
+        raw_utterances: 원시 발화 리스트
+        roles: 발화자 역할 리스트
+        similarity_threshold: 유사도 임계값 (기본값: 0.8)
+    
+    Returns:
+        중복 제거된 (preprocessed_lines, raw_utterances, roles) 튜플
     """
     if len(preprocessed_lines) <= 1:
         return preprocessed_lines, raw_utterances, roles
@@ -89,6 +108,22 @@ def process_utterances(
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     발화 리스트를 처리하여 전처리된 라인과 원시 발화, 역할 리스트를 반환합니다.
+    
+    처리 과정:
+    1. 발화자 이름 정규화
+    2. 역할 매핑
+    3. 불필요한 발화 제거 (strict_filtering=True인 경우)
+    4. 태그 적용 (<결정>, <안건>, <쟁점>)
+    5. 형식화: [역할] 이름: 발화내용
+    
+    Args:
+        dialogue_segment: 처리할 발화 리스트
+        role_map: 발화자 이름 -> 역할 매핑 딕셔너리
+        agenda_title: 안건명 (태깅에 사용)
+        strict_filtering: True면 엄격한 필터링 적용 (기본값: True)
+    
+    Returns:
+        (전처리된 라인 리스트, 원시 발화 리스트, 역할 리스트) 튜플
     """
     preprocessed_lines = []
     raw_utterances = []
@@ -120,9 +155,8 @@ def process_utterances(
             if len(utterance.strip()) <= MIN_UTTERANCE_LENGTH_STRICT:
                 continue
         
-        # 중요한 정보 추출 및 태그 적용
-        _, key_tokens = extract_key_information(utterance)
-        tagged_utterance = apply_tags(utterance, agenda_title, key_tokens, role)
+        # 태그 적용
+        tagged_utterance = apply_tags(utterance, agenda_title, role)
         
         # 형식화
         formatted_line = f"[{role}] {speaker}: {tagged_utterance}"
@@ -140,6 +174,17 @@ def apply_importance_tags_to_lines(
 ) -> List[str]:
     """
     규칙 기반 중요도 태그를 라인에 적용합니다.
+    
+    apply_importance_tags 함수를 사용하여 중요 발화를 찾고,
+    해당 발화에 <IMP> 태그를 추가합니다.
+    
+    Args:
+        preprocessed_lines: 전처리된 발화 라인 리스트
+        raw_utterances: 원시 발화 리스트 (태그 포함)
+        roles: 발화자 역할 리스트
+    
+    Returns:
+        <IMP> 태그가 적용된 전처리된 라인 리스트
     """
     if len(raw_utterances) <= 1:
         return preprocessed_lines
@@ -176,7 +221,7 @@ def preprocess_dialogue_integrated(
     Args:
         participants: 참가자 리스트
         dialogue: 전체 대화 리스트
-        agenda_info: 안건 정보 (sentence_id, keyword, topic, begin, end 등)
+        agenda_info: 안건 정보 (sentence_id, keyword, topic, next_sentence_id 등)
     
     Returns:
         전처리된 대화 텍스트
@@ -185,8 +230,7 @@ def preprocess_dialogue_integrated(
     sentence_id = agenda_info.get('sentence_id') if agenda_info else None
     keyword = agenda_info.get('keyword') if agenda_info else None
     topic = agenda_info.get('topic') if agenda_info else None
-    begin = agenda_info.get('begin') if agenda_info else None
-    end = agenda_info.get('end') if agenda_info else None
+    next_sentence_id = agenda_info.get('next_sentence_id') if agenda_info else None  # 같은 dialogue 내 다음 샘플의 sentence_id
     
     # 안건명 추출
     agenda_title = keyword if keyword else topic
@@ -195,7 +239,9 @@ def preprocess_dialogue_integrated(
     role_map = map_speaker_roles(participants)
     
     # 1. 안건 경계 탐지
-    start_idx, end_idx = extract_agenda_boundaries(dialogue, sentence_id, keyword, begin, end, role_map)
+    start_idx, end_idx = extract_agenda_boundaries(
+        dialogue, sentence_id, next_sentence_id=next_sentence_id
+    )
     
     # 안건 경계 검증
     if start_idx >= end_idx or start_idx < 0 or end_idx > len(dialogue):
@@ -255,8 +301,7 @@ def preprocess_dialogue_integrated(
                     role = role_map.get(speaker, '비지정')
                 
                 # 태그 적용
-                _, key_tokens = extract_key_information(utterance)
-                tagged_utterance = apply_tags(utterance, agenda_title, key_tokens, role)
+                tagged_utterance = apply_tags(utterance, agenda_title, role)
                 
                 formatted_line = f"[{role}] {speaker}: {tagged_utterance}"
                 preprocessed_lines.append(formatted_line)
@@ -284,7 +329,7 @@ def preprocess_dialogue_integrated(
 
 def create_prompt_template(preprocessed_dialogue: str, include_tag_explanation: bool = True) -> str:
     """
-    LLM 입력을 위한 프롬프트 템플릿을 생성합니다.
+    요약 모델 입력을 위한 프롬프트 템플릿을 생성합니다.
     """
     prompt = "다음은 국회 회의록 안건별 대화입니다."
     
@@ -292,7 +337,6 @@ def create_prompt_template(preprocessed_dialogue: str, include_tag_explanation: 
         prompt += "\n\n태그의 의미는 다음과 같습니다:\n"
         prompt += "- <IMP>: 요약에 중요한 발화 (전문위원 보고, 핵심 논의 등)\n"
         prompt += "- <결정>: 의사진행 결정사항 (가결, 부결, 의결, 상정 등)\n"
-        prompt += "- <KEY>: 중요한 키워드 (법령명, 정부 부처명, 법조항, 날짜, 의사일정 등)\n"
         prompt += "- <안건>: 안건명 (법안명)\n"
         prompt += "- <쟁점>: 논란/문제점/갈등 사항\n"
         

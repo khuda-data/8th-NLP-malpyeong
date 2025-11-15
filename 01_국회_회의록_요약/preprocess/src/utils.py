@@ -1,5 +1,11 @@
 """
 유틸리티 함수 모음
+
+주요 기능:
+- JSON 파일 로드
+- 발화자 이름 정규화
+- 역할 추론 및 매핑
+- 정부 기관명 추출
 """
 
 import json
@@ -42,7 +48,17 @@ def load_json_files(data_path: str) -> List[Dict]:
 
 
 def normalize_role(occupation: str) -> str:
-    """역할(occupation)을 표준화합니다."""
+    """
+    역할(occupation)을 표준화합니다.
+    
+    예: "위원장님" -> "소위원장", "위원장" -> "소위원장"
+    
+    Args:
+        occupation: 원본 역할 문자열
+    
+    Returns:
+        표준화된 역할 문자열
+    """
     if not occupation:
         return '비지정'
     
@@ -62,7 +78,17 @@ def normalize_role(occupation: str) -> str:
 
 
 def normalize_speaker_name(speaker: str) -> str:
-    """발화자 이름을 정규화합니다."""
+    """
+    발화자 이름을 정규화합니다.
+    
+    예: "홍길동님" -> "홍길동", "김철수 의원" -> "김철수"
+    
+    Args:
+        speaker: 원본 발화자 이름
+    
+    Returns:
+        정규화된 발화자 이름
+    """
     if not speaker:
         return ''
     
@@ -80,7 +106,17 @@ def normalize_speaker_name(speaker: str) -> str:
 
 
 def extract_government_org(occupation: str) -> Optional[str]:
-    """occupation에서 정부 기관명을 추출합니다."""
+    """
+    occupation에서 정부 기관명을 추출합니다.
+    
+    예: "교육부 장관" -> "교육부", "국방부 차관" -> "국방부"
+    
+    Args:
+        occupation: 직책 문자열
+    
+    Returns:
+        정부 기관명 (없으면 None)
+    """
     if not occupation:
         return None
     
@@ -92,7 +128,23 @@ def extract_government_org(occupation: str) -> Optional[str]:
 
 
 def infer_role_from_occupation(occupation: str, speaker_id: str) -> str:
-    """역할을 추론합니다."""
+    """
+    occupation과 speaker_id를 기반으로 역할을 추론합니다.
+    
+    우선순위:
+    1. occupation에서 정부 기관명 추출
+    2. occupation을 정규화
+    3. speaker_id에서 정부 기관명 찾기
+    4. speaker_id에서 "위원", "의원" 키워드 확인
+    5. 기본값: "비지정"
+    
+    Args:
+        occupation: 직책 문자열
+        speaker_id: 발화자 ID 문자열
+    
+    Returns:
+        추론된 역할 문자열
+    """
     if occupation:
         org = extract_government_org(occupation)
         if org:
@@ -111,7 +163,18 @@ def infer_role_from_occupation(occupation: str, speaker_id: str) -> str:
 
 
 def map_speaker_roles(participants: List[Dict]) -> Dict[str, str]:
-    """발화자 이름을 역할로 매핑합니다."""
+    """
+    발화자 이름을 역할로 매핑합니다.
+    
+    participants 리스트를 순회하며 각 발화자의 ID를 역할로 매핑합니다.
+    
+    Args:
+        participants: 참가자 정보 리스트 (각 항목은 id, occupation 등을 포함)
+    
+    Returns:
+        {발화자_id: 역할} 딕셔너리
+        예: {'speaker-1': '소위원장', 'speaker-2': '위원', 'speaker-3': '교육부'}
+    """
     role_map = {}
     for participant in participants:
         speaker_id = participant.get('id', '')

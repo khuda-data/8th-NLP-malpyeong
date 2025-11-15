@@ -1,5 +1,11 @@
 """
 메인 진입점
+
+전처리 파이프라인 실행:
+1. JSON 파일 로드
+2. 같은 dialogue 내 다음 샘플의 sentence_id 매핑 생성
+3. 각 샘플에 대해 전처리 수행
+4. 결과를 TXT 및 JSON 형식으로 저장
 """
 
 import json
@@ -15,9 +21,82 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def process_single_sample(sample: Dict) -> Dict:
+def _build_next_sentence_id_map(samples: List[Dict]) -> Dict[str, str]:
+    """
+    같은 dialogue 내 다음 샘플의 sentence_id 매핑을 생성합니다.
+    
+    같은 dialogue에 여러 안건이 있을 때, 각 안건의 다음 안건 시작점을
+    정확하게 찾기 위해 사용됩니다. (1순위 기준)
+    
+    Returns:
+        {sample_id: next_sentence_id} 딕셔너리
+        예: {'sample-1': 'SBRW2100000295.1.1.3', 'sample-2': 'SBRW2100000295.1.1.4'}
+    """
+    next_sentence_id_map = {}
+    
+    # dialogue별로 그룹화
+    dialogue_map = {}
+    for sample in samples:
+        dialogue = sample.get('input', {}).get('conversation', [])
+        if not dialogue:
+            continue
+        dialogue_key = (len(dialogue), dialogue[0].get('id'), dialogue[-1].get('id'))
+        if dialogue_key not in dialogue_map:
+            dialogue_map[dialogue_key] = []
+        dialogue_map[dialogue_key].append(sample)
+    
+    # 각 dialogue 내에서 다음 샘플 찾기
+    for dialogue_key, dialogue_samples in dialogue_map.items():
+        if len(dialogue_samples) <= 1:
+            continue
+        
+        dialogue = dialogue_samples[0].get('input', {}).get('conversation', [])
+        
+        # 각 샘플의 인덱스 찾기
+        sample_indices = []
+        for sample in dialogue_samples:
+            issue = sample.get('input', {}).get('issue', {})
+            sentence_id = issue.get('sentence_id')
+            if not sentence_id:
+                continue
+            
+            for i, utt in enumerate(dialogue):
+                if utt.get('id') == sentence_id:
+                    sample_indices.append({
+                        'sample_id': sample.get('id'),
+                        'idx': i,
+                        'sentence_id': sentence_id
+                    })
+                    break
+        
+        sample_indices.sort(key=lambda x: x['idx'])
+        
+        # 각 샘플에 대해 다음 샘플의 sentence_id 매핑
+        for i in range(len(sample_indices) - 1):
+            current = sample_indices[i]
+            next_sample = sample_indices[i + 1]
+            next_sentence_id_map[current['sample_id']] = next_sample['sentence_id']
+    
+    return next_sentence_id_map
+
+
+def process_single_sample(sample: Dict, next_sentence_id: Optional[str] = None) -> Dict:
     """
     단일 샘플을 처리합니다.
+    
+    처리 과정:
+    1. 입력 데이터 추출 (participants, dialogue, issue)
+    2. 안건 정보 추출 (sentence_id, keyword, topic, next_sentence_id)
+    3. 전처리 수행 (경계 탐지, 필터링, 태깅)
+    4. 프롬프트 템플릿 생성
+    5. 결과 반환
+    
+    Args:
+        sample: 처리할 샘플 딕셔너리
+        next_sentence_id: 같은 dialogue 내 다음 샘플의 sentence_id (있으면 최우선 사용)
+    
+    Returns:
+        전처리된 샘플 딕셔너리 (id, preprocessed_dialogue, prompt, output, agenda_info)
     """
     try:
         input_data = sample.get('input', {})
@@ -36,8 +115,7 @@ def process_single_sample(sample: Dict) -> Dict:
             'sentence_id': issue.get('sentence_id'),
             'keyword': issue.get('keyword'),
             'topic': issue.get('topic'),
-            'begin': issue.get('begin'),
-            'end': issue.get('end'),
+            'next_sentence_id': next_sentence_id,  # 같은 dialogue 내 다음 샘플의 sentence_id
         }
         
         # 통합 전처리 수행
@@ -70,6 +148,17 @@ def process_all_files(
 ) -> None:
     """
     모든 데이터셋 파일을 처리합니다.
+    
+    처리 과정:
+    1. 각 파일 로드
+    2. 같은 dialogue 내 다음 샘플의 sentence_id 매핑 생성
+    3. 각 샘플 전처리
+    4. 결과를 TXT 및 JSON 형식으로 저장
+    
+    Args:
+        input_dir: 입력 디렉토리 경로
+        output_dir: 출력 디렉토리 경로
+        file_names: 처리할 파일명 리스트 (None이면 train/dev/test 자동 처리)
     """
     if file_names is None:
         file_names = [
@@ -103,12 +192,17 @@ def process_all_files(
             logger.warning(f"파일이 비어있습니다: {file_name}")
             continue
         
+        # 같은 dialogue 내 다음 샘플의 sentence_id 매핑 생성 (100% 정확도 기준)
+        next_sentence_id_map = _build_next_sentence_id_map(samples)
+        
         preprocessed_samples = []
         error_count = 0
         
         for i, sample in enumerate(samples):
             try:
-                result = process_single_sample(sample)
+                # 같은 dialogue 내 다음 샘플의 sentence_id 가져오기 (최우선 기준)
+                next_sentence_id = next_sentence_id_map.get(sample.get('id'))
+                result = process_single_sample(sample, next_sentence_id=next_sentence_id)
                 preprocessed_samples.append({
                     'id': result['id'],
                     'preprocessed_dialogue': result['preprocessed_dialogue'],
