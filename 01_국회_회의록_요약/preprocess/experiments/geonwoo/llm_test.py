@@ -5,7 +5,7 @@ ollama pull hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M
 사용 시나리오
 - data_processing.py가 생성한 processed JSON을 입력으로 받아, 각 청크를 순차 요약합니다.
 - 각 청크 프롬프트의 {previous_summary} 자리에는 직전 청크의 요약을 넣어 연쇄 요약을 수행합니다.
-- 모든 청크 요약을 한 번 더 통합(aggregate)하여 최종 요약을 생성합니다.
+ - 누적 요약 방식: 첫 두 청크(1,2)로 1차 요약 생성 후, 이후 청크를 순차적으로 합쳐가며 갱신합니다.
 
 사전 준비
 1) Ollama 설치 및 서버 실행 (기본 호스트: http://localhost:11434)
@@ -39,7 +39,7 @@ ollama pull hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M
 
 출력
 - 요약 결과 JSON (기본): ./experiments/geonwoo/summaries/summaries_국회회의록안건별요약_dev_qwen2.5-8b.json
-- 포함 항목: id, chunk_summaries, final_summary, gold_output
+- 포함 항목: id, chunk_summaries(누적 요약 목록), final_summary(마지막 누적 요약), gold_output
 
 기타
 - Ollama가 다른 호스트/포트라면 OllamaClient(host="http://127.0.0.1:11434")로 조정하세요.
@@ -91,13 +91,6 @@ class OllamaClient:
 			return obj.get("response", "")
 
 
-AGGREGATE_PROMPT = (
-	"아래는 연속된 청크 요약들입니다. 중복을 제거하고 핵심만 남겨 하나의 간결한 최종 요약을 작성하세요.\n"
-	"- 의사일정 번호, 안건명, 결정사항, 전문위원 의견, 법조항, 쟁점/문제점 포함\n"
-	"- 문장 흐름이 자연스럽게 이어지게 작성\n"
-	"\n[청크 요약들]\n{chunk_summaries}\n\n[요청]\n최종 요약:\n"
-)
-
 
 def run_chunk_summarization(
 	processed_file: str,
@@ -144,23 +137,21 @@ def run_chunk_summarization(
 		gold_output = sample.get("outputs")
 
 		prev_summary = ""
-		chunk_summaries: List[str] = []
+		chunk_summaries: List[str] = []  # 누적 요약 단계별 결과 저장
 
-		for ci, prompt in enumerate(prompts, start=1):
-			# 첫 청크는 '없음', 이후에는 직전 청크 요약을 {previous_summary}에 주입
-			filled_prompt = prompt.replace("{previous_summary}", prev_summary or "없음")
+		if len(prompts) == 0:
+			final_summary = ""
+		else:
+			# 1) 청크1만 요약 (워밍업), 저장하지 않음
+			filled_prompt = prompts[0].replace("{previous_summary}", "없음")
 			if print_prompts:
-				prev_len = len(prev_summary or "없음")
-				print(f"\n--- CHUNK {ci} / {len(prompts)} ---")
+				prev_len = len("없음")
+				print(f"\n--- CHUNK 1 / {len(prompts)} ---")
 				print(f"[prev_summary length]: {prev_len}")
 				print("[prompt head]:")
 				print(filled_prompt[:500])
-			summary = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False)
-			chunk_summaries.append(summary.strip())
-			prev_summary = summary.strip()
+			s1 = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
 			time.sleep(sleep_sec)
-
-			# 진행 상황 갱신
 			processed_chunks += 1
 			if show_progress and total_chunks > 0:
 				elapsed = time.time() - start_ts
@@ -172,15 +163,66 @@ def run_chunk_summarization(
 				percent = (processed_chunks / total_chunks) * 100.0
 				print(
 					f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
-					f"sample {idx}/{total} | chunk {ci}/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
+					f"sample {idx}/{total} | chunk 1/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
 				)
 
-		final_summary = client.generate(
-			model=model,
-			prompt=AGGREGATE_PROMPT.replace("{chunk_summaries}", "\n\n".join(chunk_summaries)),
-			options=opts,
-			stream=False,
-		).strip()
+			# 2) 청크2부터 누적 요약 시작
+			if len(prompts) >= 2:
+				# 요약1 = s1 + 청크2
+				filled_prompt = prompts[1].replace("{previous_summary}", s1)
+				if print_prompts:
+					prev_len = len(s1)
+					print(f"\n--- CHUNK 2 / {len(prompts)} ---")
+					print(f"[prev_summary length]: {prev_len}")
+					print("[prompt head]:")
+					print(filled_prompt[:500])
+				summary = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
+				chunk_summaries.append(summary)
+				prev_summary = summary
+				time.sleep(sleep_sec)
+				processed_chunks += 1
+				if show_progress and total_chunks > 0:
+					elapsed = time.time() - start_ts
+					rate = processed_chunks / elapsed if elapsed > 0 else 0.0
+					remaining = max(total_chunks - processed_chunks, 0)
+					eta_sec = int(remaining / rate) if rate > 0 else 0
+					eta_min = eta_sec // 60
+					eta_rem = eta_sec % 60
+					percent = (processed_chunks / total_chunks) * 100.0
+					print(
+						f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
+						f"sample {idx}/{total} | chunk 2/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
+					)
+
+				# 이후 청크3..N: 누적 요약 + 다음 청크
+				for ci in range(3, len(prompts) + 1):
+					prompt = prompts[ci - 1]
+					filled_prompt = prompt.replace("{previous_summary}", prev_summary)
+					if print_prompts:
+						prev_len = len(prev_summary)
+						print(f"\n--- CHUNK {ci} / {len(prompts)} ---")
+						print(f"[prev_summary length]: {prev_len}")
+						print("[prompt head]:")
+						print(filled_prompt[:500])
+					summary = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
+					chunk_summaries.append(summary)
+					prev_summary = summary
+					time.sleep(sleep_sec)
+					processed_chunks += 1
+					if show_progress and total_chunks > 0:
+						elapsed = time.time() - start_ts
+						rate = processed_chunks / elapsed if elapsed > 0 else 0.0
+						remaining = max(total_chunks - processed_chunks, 0)
+						eta_sec = int(remaining / rate) if rate > 0 else 0
+						eta_min = eta_sec // 60
+						eta_rem = eta_sec % 60
+						percent = (processed_chunks / total_chunks) * 100.0
+						print(
+							f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
+							f"sample {idx}/{total} | chunk {ci}/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
+						)
+
+			final_summary = (chunk_summaries[-1] if len(chunk_summaries) > 0 else s1)
 
 		outputs.append(
 			{
