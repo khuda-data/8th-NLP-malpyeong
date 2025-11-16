@@ -1,8 +1,17 @@
 import json
 import hanja_module.hanjahangul as hanja
+try:
+    from src.tagging import apply_tags
+except ModuleNotFoundError:
+    import os, sys
+    # 현재 파일 기준으로 상위 두 단계(preprocess) 경로를 PYTHONPATH에 추가
+    ROOT_PREPROCESS = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    if ROOT_PREPROCESS not in sys.path:
+        sys.path.append(ROOT_PREPROCESS)
+    from src.tagging import apply_tags
 
-INDEX = 4
-
+INPUT_FILE = "국회회의록안건별요약_dev"
+input_path = f"./data/{INPUT_FILE}.json"
 MAX_CHUNK_LEN = 500
 CONFIG_PROMPT = """당신은 대한민국 국회의 회의록을 요약하는 전문가입니다. 주어진 대화 내용에서 핵심적인 발언들을 선별하여 요약문을 작성해야 합니다.
 다음은 회의록의 주제와 관련된 정보입니다:
@@ -10,16 +19,35 @@ CONFIG_PROMPT = """당신은 대한민국 국회의 회의록을 요약하는 �
 주요 키워드: {keyword}
 발언자: {speaker}
 
-다음은 회의록의 대화 내용입니다. 대화 내용 중 핵심적인 발언들을 선별하여 요약문을 작성하세요.
+태그의 의미는 다음과 같습니다:
+- <IMP>: 요약에 중요한 발화 (전문위원 보고, 핵심 논의 등)
+- <결정>: 의사진행 결정사항 (가결, 부결, 의결, 상정 등)
+- <안건>: 안건명 (법안명)
+- <쟁점>: 논란/문제점/갈등 사항
+
+요약 시 다음 정보를 반드시 포함해주세요:
+- 의사일정 번호 (예: 의사일정 제N항)
+- 법안명 (안건명)
+- 결정사항 (의결, 가결, 부결 등)
+- 전문위원 의견 (있는 경우)
+- 법조항 (언급된 경우)
+- 쟁점/문제점 (있는 경우)
+
+요약된 이전 대화:
+{previous_summary}
+다음 대화:
+{dialogue}
+
+위 대화를 요약해주세요.
 """
-CONFIG_SPEAKER = "<ROLE>{occupation}<ROLE> <NAME>{name}<NAME>"
+CONFIG_SPEAKER = "<역할>{occupation}</역할> <이름>{name}</이름>"
 
 def get_index_from_id(id_):
     return int(id_.split(".")[-1]) - 1
 
 def preprocess_conversation(input_conversation, speaker_same_as_previous=False):
     return_text = (" " if speaker_same_as_previous else input_conversation["speaker"] + ": ") + input_conversation["utterance"]
-    return_text = return_text.replace("......", "<REMOVE_DOTS>")
+    return_text = return_text.replace("......", " ") # <REMOVE_DOTS>
 
     return return_text
 
@@ -89,144 +117,168 @@ def make_chunk_index_list(texts, max_chunk_len):
     lengths = [len(t) for t in texts]
     return make_chunk_index_list_by_lengths(lengths, max_chunk_len)
 
-input_path = "./data/국회회의록안건별요약_dev.json"
-
 with open(input_path, "r", encoding="utf-8") as f:
     data = json.load(f)
 
-sample = data[INDEX - 1]
+outputs = []
 
-sample_inp = sample["input"]
-issue = sample_inp["issue"]
+for sample in data:
+    sample_inp = sample["input"]
+    issue = sample_inp["issue"]
 
-speaker = sample_inp["speaker"]
-topic = hanja.hanja_to_hangul_dueum(issue["topic"])
-keyword = issue['keyword']
+    speaker = sample_inp["speaker"]
+    topic = "정의되지 않음" if len(issue["topic"]) == 0 else hanja.hanja_to_hangul_dueum(issue["topic"])
+    keyword = issue['keyword']
 
-keyword_sentence_id = issue['sentence_id']
-keyword_sentence_int = get_index_from_id(keyword_sentence_id)
+    keyword_sentence_id = issue['sentence_id']
+    keyword_sentence_int = get_index_from_id(keyword_sentence_id)
 
-begin_id = keyword_sentence_id
-end_id = sample_inp["conversation"][-1]["id"]
+    begin_id = keyword_sentence_id
+    end_id = sample_inp["conversation"][-1]["id"]
 
-is_begine_found = False
-is_end_found = False
+    is_begine_found = False
+    is_end_found = False
 
-ids = []
+    ids = []
 
-########################################################
-# 프롬프트 설계
-########################################################
+    ########################################################
+    # 프롬프트 설계
+    ########################################################
 
-PROMPT = CONFIG_PROMPT.replace("{topic}", topic).replace("{keyword}", keyword).replace("{speaker}", speaker_to_text(speaker))
+    PROMPT = CONFIG_PROMPT.replace("{topic}", topic).replace("{keyword}", keyword).replace("{speaker}", speaker_to_text(speaker))
 
-########################################################
-# 전처리 1단계
-# 
-# "선포"로 나누는 과정
-########################################################
+    ########################################################
+    # 전처리 1단계
+    # 
+    # "선포"로 나누는 과정
+    ########################################################
 
-for conv in sample["input"]["conversation"]:
-    if "선포" in conv["utterance"]:
-        id_ = conv["id"]
-        id_int = get_index_from_id(id_)
-        
-        ids.append(id_)
+    for conv in sample["input"]["conversation"]:
+        if "선포" in conv["utterance"]:
+            id_ = conv["id"]
+            id_int = get_index_from_id(id_)
 
-        if not is_begine_found and id_int < keyword_sentence_int:
-            begin_id = id_
-            is_begine_found = True
-        if not is_end_found and id_int > keyword_sentence_int:
-            end_id = id_
-            is_end_found = True
+            ids.append(id_)
 
-########################################################
-# 전처리 2단계
-#
-# begin_id ~ end_id 범위의 발화를 순회하며 필터링한다.
-#
-# 1) 1차 길이 필터: 공백과 '.'을 제거한 문자열 길이가 11자 이상인지 확인한다.
-#    - 11자 미만이면 즉시 제외.
-# 2) 길이 통과 후 포함 규칙:
-#    - 숫자 포함 문장: 포함.
-#    - '.......' 포함 문장: 정제 길이(공백·마침표 제거) >= 20 일 때만 포함.
-#    - 숫자도 '.......'도 없는 문장: 포함.
-#
-# 최종적으로 제외되는 경우는 두 가지:
-#    A. 정제 길이 <= 10
-#    B. 정제 길이 11~19 이면서 '.......' 포함
-#
-# 요약: 짧은 문장을 걸러내고(정제 길이 ≤10), 점선(".......")으로만 이루어지거나 망설임 성격의 짧은 문장은 더 엄격히 배제한다(정제 길이 11~19).
-########################################################
+            if not is_begine_found and id_int < keyword_sentence_int:
+                begin_id = id_
+                is_begine_found = True
+            if not is_end_found and id_int > keyword_sentence_int:
+                end_id = id_
+                is_end_found = True
 
-preprocessing_array = []
+    ########################################################
+    # 전처리 2단계
+    #
+    # begin_id ~ end_id 범위의 발화를 순회하며 필터링한다.
+    #
+    # 1) 1차 길이 필터: 공백과 '.'을 제거한 문자열 길이가 11자 이상인지 확인한다.
+    #    - 11자 미만이면 즉시 제외.
+    # 2) 길이 통과 후 포함 규칙:
+    #    - 숫자 포함 문장: 포함.
+    #    - '.......' 포함 문장: 정제 길이(공백·마침표 제거) >= 20 일 때만 포함.
+    #    - 숫자도 '.......'도 없는 문장: 포함.
+    #
+    # 최종적으로 제외되는 경우는 두 가지:
+    #    A. 정제 길이 <= 10
+    #    B. 정제 길이 11~19 이면서 '.......' 포함
+    #
+    # 요약: 짧은 문장을 걸러내고(정제 길이 ≤10), 점선(".......")으로만 이루어지거나 망설임 성격의 짧은 문장은 더 엄격히 배제한다(정제 길이 11~19).
+    ########################################################
 
-for index in range(get_index_from_id(begin_id), get_index_from_id(end_id) + 1):
-    conv = sample_inp["conversation"][index]
-    utterance = conv["utterance"]
+    preprocessing_array = []
 
-    speaker_same_as_previous = False
-    
-    if len(preprocessing_array) > 0:
-        previous_conv_speaker = preprocessing_array[-1].split(": ")[0]
-        if conv["speaker"] == previous_conv_speaker:
-            speaker_same_as_previous = True
+    for index in range(get_index_from_id(begin_id), get_index_from_id(end_id) + 1):
+        conv = sample_inp["conversation"][index]
+        utterance = conv["utterance"]
 
-    # 필터 규칙: 정제 길이 > 10을 통과한 뒤
-    #  - 숫자가 있으면 포함
-    #  - '.......'이 있으면 정제 길이 >= 20일 때만 포함
-    #  - 둘 다 없으면 포함
+        speaker_same_as_previous = False
 
-    # print(speaker_same_as_previous, len(preprocessing_array))
+        if len(preprocessing_array) > 0:
+            previous_conv_speaker = preprocessing_array[-1].split(": ")[0]
+            if conv["speaker"] == previous_conv_speaker:
+                speaker_same_as_previous = True
 
-    filter_utterance = "".join("".join(utterance.split(" ")).split("."))
-    speaker_and_utterance = (" " if speaker_same_as_previous else conv["speaker"] + ": ") + conv["utterance"]
-    speaker_and_utterance = speaker_and_utterance.replace("......", "<REMOVE_DOTS>")
-    
-    if len(filter_utterance) > 10:
-        has_digit = any(char.isdigit() for char in utterance)
-        has_dots = "......." in utterance
+        # 필터 규칙: 정제 길이 > 10을 통과한 뒤
+        #  - 숫자가 있으면 포함
+        #  - '.......'이 있으면 정제 길이 >= 20일 때만 포함
+        #  - 둘 다 없으면 포함
 
-        if has_digit:
-            if speaker_same_as_previous:
-                preprocessing_array[-1] += speaker_and_utterance
-            else:
-                preprocessing_array.append(speaker_and_utterance)
-        elif not has_digit:
-            if has_dots:
-                if len(filter_utterance) >= 20:
-                    if speaker_same_as_previous:
-                        preprocessing_array[-1] += speaker_and_utterance
-                    else:
-                        preprocessing_array.append(speaker_and_utterance)
-            else:
+        # print(speaker_same_as_previous, len(preprocessing_array))
+
+        filter_utterance = "".join("".join(utterance.split(" ")).split("."))
+        speaker_and_utterance = (" " if speaker_same_as_previous else conv["speaker"] + ": ") + conv["utterance"]
+        speaker_and_utterance = speaker_and_utterance.replace("......", "<REMOVE_DOTS>")
+
+        if len(filter_utterance) > 10:
+            has_digit = any(char.isdigit() for char in utterance)
+            has_dots = "......." in utterance
+
+            if has_digit:
                 if speaker_same_as_previous:
                     preprocessing_array[-1] += speaker_and_utterance
                 else:
                     preprocessing_array.append(speaker_and_utterance)
+            elif not has_digit:
+                if has_dots:
+                    if len(filter_utterance) >= 20:
+                        if speaker_same_as_previous:
+                            preprocessing_array[-1] += speaker_and_utterance
+                        else:
+                            preprocessing_array.append(speaker_and_utterance)
+                else:
+                    if speaker_same_as_previous:
+                        preprocessing_array[-1] += speaker_and_utterance
+                    else:
+                        preprocessing_array.append(speaker_and_utterance)
 
-# print("keyword_sentence_id:", keyword_sentence_id)
-# print("begin_id:", begin_id)
-# print("end_id:", end_id)
+    # print("keyword_sentence_id:", keyword_sentence_id)
+    # print("begin_id:", begin_id)
+    # print("end_id:", end_id)
 
-###############################################
-# 비-분할 입력 생성
-###############################################
+    ###############################################
+    # 비-분할 입력 생성
+    ###############################################
 
-# FINAL_INPUT = PROMPT + "\n".join(preprocessing_array)
-# print(FINAL_INPUT)
+    # FINAL_INPUT = PROMPT + "\n".join(preprocessing_array)
+    # print(FINAL_INPUT)
 
-###################################################
-# 분할 입력 생성
-###################################################
+    ###################################################
+    # 분할 입력 생성
+    ###################################################
 
-FINAL_INPUT = [PROMPT]
+    FINAL_INPUT = []
 
-for chunk in make_chunk_index_list(preprocessing_array, MAX_CHUNK_LEN):
-    chunk_text = "\n".join([preprocessing_array[i] for i in chunk])
-    print("----- CHUNK START -----")
-    print(chunk_text)
-    print("----- CHUNK END -----\n\n")
+    for chunk in make_chunk_index_list(preprocessing_array, MAX_CHUNK_LEN):
+        chunk_lines = [preprocessing_array[i] for i in chunk]
+        agenda_title = keyword if keyword else topic
 
-    FINAL_INPUT.append(chunk_text)
+        # 각 줄의 발화 부분에 태그 적용 (형식: "화자: 발화")
+        tagged_lines = []
+        for line in chunk_lines:
+            if ": " in line:
+                prefix, utter = line.split(": ", 1)
+                tagged = apply_tags(utter, agenda_title=agenda_title, role=None)
+                tagged_lines.append(f"{prefix}: {tagged}")
+            else:
+                tagged_lines.append(apply_tags(line, agenda_title=agenda_title, role=None))
 
+        tagged_chunk_text = "\n".join(tagged_lines)
+
+        # print("----- CHUNK START (TAGGED) -----")
+        # print(tagged_chunk_text)
+        # print("----- CHUNK END -----\n\n")
+
+        FINAL_INPUT.append(
+            PROMPT
+                .replace("{dialogue}", tagged_chunk_text)
+        )
+
+    outputs.append({
+        "id": sample["id"],
+        "inputs": FINAL_INPUT,
+        "outputs": sample["output"]
+    })
+
+with open(f"./experiments/geonwoo/processed/processed_{INPUT_FILE}.json", "w", encoding="utf-8") as f:
+    json.dump(outputs, f, ensure_ascii=False, indent=2)
