@@ -12,33 +12,20 @@ except ModuleNotFoundError:
 
 INPUT_FILE = "국회회의록안건별요약_dev"
 input_path = f"./data/{INPUT_FILE}.json"
-MAX_CHUNK_LEN = 500
-CONFIG_PROMPT = """당신은 대한민국 국회의 회의록을 요약하는 전문가입니다. 주어진 대화 내용에서 핵심적인 발언들을 선별하여 요약문을 작성해야 합니다.
-다음은 회의록의 주제와 관련된 정보입니다:
+MAX_CHUNK_LEN = 250
+CONFIG_PROMPT = """{PROMPT}
+
 주제: {topic}
 주요 키워드: {keyword}
 발언자: {speaker}
 
-태그의 의미는 다음과 같습니다:
-- <IMP>: 요약에 중요한 발화 (전문위원 보고, 핵심 논의 등)
-- <결정>: 의사진행 결정사항 (가결, 부결, 의결, 상정 등)
-- <안건>: 안건명 (법안명)
-- <쟁점>: 논란/문제점/갈등 사항
-
-요약 시 다음 정보를 반드시 포함해주세요:
-- 의사일정 번호 (예: 의사일정 제N항)
-- 법안명 (안건명)
-- 결정사항 (의결, 가결, 부결 등)
-- 전문위원 의견 (있는 경우)
-- 법조항 (언급된 경우)
-- 쟁점/문제점 (있는 경우)
-
-요약된 이전 대화:
+이전 요약:
 {previous_summary}
-다음 대화:
+
+현재 대화:
 {dialogue}
 
-위 대화를 요약해주세요.
+위 규칙에 따라 하나의 최종 요약문을 생성하시오.
 """
 CONFIG_SPEAKER = "<역할>{occupation}</역할> <이름>{name}</이름>"
 
@@ -136,7 +123,6 @@ for sample in data:
     begin_id = keyword_sentence_id
     end_id = sample_inp["conversation"][-1]["id"]
 
-    is_begine_found = False
     is_end_found = False
 
     ids = []
@@ -160,9 +146,6 @@ for sample in data:
 
             ids.append(id_)
 
-            if not is_begine_found and id_int < keyword_sentence_int:
-                begin_id = id_
-                is_begine_found = True
             if not is_end_found and id_int > keyword_sentence_int:
                 end_id = id_
                 is_end_found = True

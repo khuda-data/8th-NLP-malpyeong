@@ -1,6 +1,7 @@
 """
 Ollama(qwen2.5 8B) 기반 청크 요약 실행 스크립트
 ollama pull hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M
+ollama pull hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K
 
 사용 시나리오
 - data_processing.py가 생성한 processed JSON을 입력으로 받아, 각 청크를 순차 요약합니다.
@@ -22,12 +23,12 @@ ollama pull hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M
 	python -u experiments/geonwoo/llm_test.py
 
 - 옵션 지정 실행
-	python -u experiments/geonwoo/llm_test.py \
-    --processed-file "./experiments/geonwoo/processed/processed_국회회의록안건별요약_dev.json" \
-    --model "hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M" \
-    --temperature 0.2 \
-    --num-predict 1024 \
-    --limit 1 \
+	python -u experiments/geonwoo/llm_test.py 
+    --processed-file "./experiments/geonwoo/processed/processed_국회회의록안건별요약_dev.json" 
+    --model "hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K" 
+    --temperature 0.2 
+    --num-predict 1024 
+    --limit 1 
     --out "./experiments/geonwoo/summaries/blossom8b_test.json"
 
 - 특정 N번째(1-based) 샘플만 실행
@@ -57,6 +58,8 @@ try:
 except ImportError as e:
 	raise SystemExit("requests 패키지가 필요합니다. `pip install requests` 후 다시 실행하세요.")
 
+with open("./experiments/geonwoo/PROMPT.txt", "r", encoding="utf-8") as f:
+	PROMPT = f.read()
 
 class OllamaClient:
 	def __init__(self, host: str = "http://localhost:11434"):
@@ -91,6 +94,35 @@ class OllamaClient:
 			return obj.get("response", "")
 
 
+def generate_with_retry(
+	client: "OllamaClient",
+	model: str,
+	prompt: str,
+	options: Dict[str, Any] | None,
+	max_retries: int,
+	sleep_sec: float,
+) -> str:
+	"""
+	Generate text and re-infer if output contains a newline or the word '요약'.
+	On retries, append a short instruction to force a single-line output without the banned word.
+	"""
+	attempt = 0
+	last = ""
+	cur_prompt = prompt
+	retry_suffix = "\n\n주의: 출력은 반드시 한 줄로만 작성하고, '요약'이라는 단어를 포함하지 마세요."
+	while True:
+		last = client.generate(model=model, prompt=cur_prompt, options=options, stream=False).strip()
+		needs_retry = ("\n" in last) or ("요약" in last)
+		if not needs_retry:
+			return last
+		if attempt >= max_retries:
+			return last
+		attempt += 1
+		print(f"재추론 시도 {attempt}/{max_retries}: 금지된 패턴 발견(\\n 또는 '요약').")
+		cur_prompt = prompt + retry_suffix
+		time.sleep(sleep_sec)
+
+
 
 def run_chunk_summarization(
 	processed_file: str,
@@ -102,6 +134,7 @@ def run_chunk_summarization(
 	print_prompts: bool = False,
     show_progress: bool = True,
     index: int | None = None,
+	max_retries: int = 2,
 ) -> List[Dict[str, Any]]:
 	with open(processed_file, "r", encoding="utf-8") as f:
 		data = json.load(f)
@@ -139,6 +172,14 @@ def run_chunk_summarization(
 		prev_summary = ""
 		chunk_summaries: List[str] = []  # 누적 요약 단계별 결과 저장
 
+		prompts = list(map(
+			lambda x: x.replace("{PROMPT}", PROMPT), prompts
+		))
+
+		# Optional debug printing is controlled by --print-prompts
+		if print_prompts:
+			print(f"[debug] prompts count: {len(prompts)}")
+
 		if len(prompts) == 0:
 			final_summary = ""
 		else:
@@ -150,7 +191,14 @@ def run_chunk_summarization(
 				print(f"[prev_summary length]: {prev_len}")
 				print("[prompt head]:")
 				print(filled_prompt[:500])
-			s1 = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
+			s1 = generate_with_retry(
+				client=client,
+				model=model,
+				prompt=filled_prompt,
+				options=opts,
+				max_retries=max_retries,
+				sleep_sec=sleep_sec,
+			)
 			time.sleep(sleep_sec)
 			processed_chunks += 1
 			if show_progress and total_chunks > 0:
@@ -176,7 +224,14 @@ def run_chunk_summarization(
 					print(f"[prev_summary length]: {prev_len}")
 					print("[prompt head]:")
 					print(filled_prompt[:500])
-				summary = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
+				summary = generate_with_retry(
+					client=client,
+					model=model,
+					prompt=filled_prompt,
+					options=opts,
+					max_retries=max_retries,
+					sleep_sec=sleep_sec,
+				)
 				chunk_summaries.append(summary)
 				prev_summary = summary
 				time.sleep(sleep_sec)
@@ -204,7 +259,14 @@ def run_chunk_summarization(
 						print(f"[prev_summary length]: {prev_len}")
 						print("[prompt head]:")
 						print(filled_prompt[:500])
-					summary = client.generate(model=model, prompt=filled_prompt, options=opts, stream=False).strip()
+					summary = generate_with_retry(
+						client=client,
+						model=model,
+						prompt=filled_prompt,
+						options=opts,
+						max_retries=max_retries,
+						sleep_sec=sleep_sec,
+					)
 					chunk_summaries.append(summary)
 					prev_summary = summary
 					time.sleep(sleep_sec)
@@ -256,6 +318,7 @@ def main():
 	parser.add_argument("--index", type=int, default=None, help="요약할 N번째 샘플 (1-based). 지정 시 limit 무시")
 	parser.add_argument("--print-prompts", action="store_true", help="치환된 프롬프트(앞 500자)와 이전 요약 길이를 출력")
 	parser.add_argument("--no-progress", action="store_true", help="진행률/ETA 출력 비활성화")
+	parser.add_argument("--max-retries", type=int, default=2, help="요약문에 금지 패턴(\\n, '요약문')이 포함될 경우 재추론 시도 횟수")
 	parser.add_argument(
 		"--out",
 		default="./experiments/geonwoo/summaries/summaries_국회회의록안건별요약_dev_qwen2.5-8b.json",
@@ -275,6 +338,7 @@ def main():
 		print_prompts=args.print_prompts,
         show_progress=not args.no_progress,
         index=args.index,
+		max_retries=args.max_retries,
 	)
 
 	with open(args.out, "w", encoding="utf-8") as f:
