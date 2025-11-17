@@ -12,7 +12,8 @@ except ModuleNotFoundError:
 
 INPUT_FILE = "국회회의록안건별요약_dev"
 input_path = f"./data/{INPUT_FILE}.json"
-MAX_CHUNK_LEN = 250
+# 고정 크기 청크 분할 길이 (예: 3이면 [0,2], [3,5], ...)
+CHUNK_LEN = 10
 CONFIG_PROMPT = """{PROMPT}
 
 주제: {topic}
@@ -103,6 +104,22 @@ def make_chunk_index_list(texts, max_chunk_len):
     """
     lengths = [len(t) for t in texts]
     return make_chunk_index_list_by_lengths(lengths, max_chunk_len)
+
+def make_fixed_size_chunk_ranges(n_items, chunk_len):
+    """항목 개수와 고정 청크 크기를 받아 (start, end) 형태의 인덱스 범위 리스트를 반환한다.
+
+    예: n_items=9, chunk_len=3 -> [(0,2), (3,5), (6,8)]
+        n_items=10, chunk_len=3 -> [(0,2), (3,5), (6,8), (9,9)]
+    """
+    ranges = []
+    if chunk_len <= 0:
+        return ranges
+    start = 0
+    while start < n_items:
+        end = min(start + chunk_len - 1, n_items - 1)
+        ranges.append((start, end))
+        start = end + 1
+    return ranges
 
 with open(input_path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -232,8 +249,8 @@ for sample in data:
 
     FINAL_INPUT = []
 
-    for chunk in make_chunk_index_list(preprocessing_array, MAX_CHUNK_LEN):
-        chunk_lines = [preprocessing_array[i] for i in chunk]
+    for start_idx, end_idx in make_fixed_size_chunk_ranges(len(preprocessing_array), CHUNK_LEN):
+        chunk_lines = preprocessing_array[start_idx:end_idx + 1]
         agenda_title = keyword if keyword else topic
 
         # 각 줄의 발화 부분에 태그 적용 (형식: "화자: 발화")
