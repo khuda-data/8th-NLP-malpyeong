@@ -32,9 +32,9 @@ ollama pull hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K
     --out "./experiments/geonwoo/summaries/blossom8b_test.json"
 
 - 특정 N번째(1-based) 샘플만 실행
-	python -u experiments/geonwoo/llm_test.py \
-		--processed-file "./experiments/geonwoo/processed/processed_국회회의록안건별요약_dev.json" \
-		--model "qwen2.5:8b" \
+	python -u experiments/geonwoo/llm_test.py 
+		--processed-file "./experiments/geonwoo/processed/processed_국회회의록안건별요약_dev.json" 
+		--model "hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K" 
 		--index 5
 
 
@@ -109,16 +109,16 @@ def generate_with_retry(
 	attempt = 0
 	last = ""
 	cur_prompt = prompt
-	retry_suffix = "\n\n주의: 출력은 반드시 한 줄로만 작성하고, '요약'이라는 단어를 포함하지 마세요."
+	retry_suffix = "\n\n주의: 출력은 반드시 한 줄로만 작성하고, '요약문'이라는 단어를 포함하지 마세요. 요약 주의사항을 주의 깊게 탐구하세요."
 	while True:
 		last = client.generate(model=model, prompt=cur_prompt, options=options, stream=False).strip()
-		needs_retry = ("\n" in last) or ("요약" in last)
+		needs_retry = ("\n" in last) or ("요약문" in last)
 		if not needs_retry:
 			return last
 		if attempt >= max_retries:
 			return last
 		attempt += 1
-		print(f"재추론 시도 {attempt}/{max_retries}: 금지된 패턴 발견(\\n 또는 '요약').")
+		print(f"재추론 시도 {attempt}/{max_retries}: 금지된 패턴 발견(\\n 또는 '요약문').")
 		cur_prompt = prompt + retry_suffix
 		time.sleep(sleep_sec)
 
@@ -134,7 +134,7 @@ def run_chunk_summarization(
 	print_prompts: bool = False,
     show_progress: bool = True,
     index: int | None = None,
-	max_retries: int = 2,
+	max_retries: int = 10,
 ) -> List[Dict[str, Any]]:
 	with open(processed_file, "r", encoding="utf-8") as f:
 		data = json.load(f)
@@ -309,19 +309,19 @@ def main():
 	)
 	parser.add_argument(
 		"--model",
-		default="qwen2.5:8b",
+		default="hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K",
 		help="Ollama 모델 태그 (예: qwen2.5:8b, qwen2.5:7b-instruct 등)",
 	)
 	parser.add_argument("--temperature", type=float, default=0.2)
-	parser.add_argument("--num-predict", type=int, default=None, help="최대 생성 토큰")
+	parser.add_argument("--num-predict", type=int, default=1024, help="최대 생성 토큰")
 	parser.add_argument("--limit", type=int, default=None, help="처리할 샘플 개수 제한")
-	parser.add_argument("--index", type=int, default=None, help="요약할 N번째 샘플 (1-based). 지정 시 limit 무시")
+	parser.add_argument("--index", type=int, default=3, help="요약할 N번째 샘플 (1-based). 지정 시 limit 무시")
 	parser.add_argument("--print-prompts", action="store_true", help="치환된 프롬프트(앞 500자)와 이전 요약 길이를 출력")
 	parser.add_argument("--no-progress", action="store_true", help="진행률/ETA 출력 비활성화")
-	parser.add_argument("--max-retries", type=int, default=2, help="요약문에 금지 패턴(\\n, '요약문')이 포함될 경우 재추론 시도 횟수")
+	parser.add_argument("--max-retries", type=int, default=10, help="요약문에 금지 패턴(\\n, '요약문')이 포함될 경우 재추론 시도 횟수")
 	parser.add_argument(
 		"--out",
-		default="./experiments/geonwoo/summaries/summaries_국회회의록안건별요약_dev_qwen2.5-8b.json",
+		default="./experiments/geonwoo/summaries/result.json",
 		help="요약 결과 저장 경로",
 	)
 

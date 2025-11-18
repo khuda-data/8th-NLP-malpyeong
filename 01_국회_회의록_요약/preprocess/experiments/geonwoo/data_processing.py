@@ -14,17 +14,18 @@ INPUT_FILE = "국회회의록안건별요약_dev"
 input_path = f"./data/{INPUT_FILE}.json"
 # 고정 크기 청크 분할 길이 (예: 3이면 [0,2], [3,5], ...)
 CHUNK_LEN = 10
-CONFIG_PROMPT = """{PROMPT}
-
-주제: {topic}
-주요 키워드: {keyword}
-발언자: {speaker}
+CONFIG_PROMPT = """발언자: {speaker}
 
 이전 요약:
 {previous_summary}
 
 현재 대화:
 {dialogue}
+
+{PROMPT}
+
+주제: {topic}
+주요 키워드: {keyword}
 
 위 규칙에 따라 하나의 최종 요약문을 생성하시오.
 """
