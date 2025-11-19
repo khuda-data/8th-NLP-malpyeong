@@ -183,47 +183,29 @@ def run_chunk_summarization(
 		if len(prompts) == 0:
 			final_summary = ""
 		else:
-			# 1) 청크1만 요약 (워밍업), 저장하지 않음
-			filled_prompt = prompts[0].replace("{previous_summary}", "없음")
-			if print_prompts:
-				prev_len = len("없음")
-				print(f"\n--- CHUNK 1 / {len(prompts)} ---")
-				print(f"[prev_summary length]: {prev_len}")
-				print("[prompt head]:")
-				print(filled_prompt[:500])
-			s1 = generate_with_retry(
-				client=client,
-				model=model,
-				prompt=filled_prompt,
-				options=opts,
-				max_retries=max_retries,
-				sleep_sec=sleep_sec,
-			)
-			time.sleep(sleep_sec)
-			processed_chunks += 1
-			if show_progress and total_chunks > 0:
-				elapsed = time.time() - start_ts
-				rate = processed_chunks / elapsed if elapsed > 0 else 0.0
-				remaining = max(total_chunks - processed_chunks, 0)
-				eta_sec = int(remaining / rate) if rate > 0 else 0
-				eta_min = eta_sec // 60
-				eta_rem = eta_sec % 60
-				percent = (processed_chunks / total_chunks) * 100.0
-				print(
-					f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
-					f"sample {idx}/{total} | chunk 1/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
-				)
+			# 단일 루프로 청크 1~N 처리 (1은 워밍업, 2~N은 누적)
+			s1 = ""
+			for ci in range(1, len(prompts) + 1):
+				prompt = prompts[ci - 1]
+				if ci == 1:
+					filled_prompt = prompt.replace("{previous_summary}", "없음")
+					filled_prompt = filled_prompt.replace("{step}", ["중간", "최종"][(processed_chunks+1)//len(prompts)])
+					if print_prompts:
+						prev_len = len("없음")
+						print(f"\n--- CHUNK {ci} / {len(prompts)} ---")
+						print(f"[prev_summary length]: {prev_len}")
+						print("[prompt head]:")
+						print(filled_prompt[:500])
+				else:
+					filled_prompt = prompt.replace("{previous_summary}", prev_summary)
+					filled_prompt = filled_prompt.replace("{step}", ["중간", "최종"][(processed_chunks+1)//len(prompts)])
+					if print_prompts:
+						prev_len = len(prev_summary)
+						print(f"\n--- CHUNK {ci} / {len(prompts)} ---")
+						print(f"[prev_summary length]: {prev_len}")
+						print("[prompt head]:")
+						print(filled_prompt[:500])
 
-			# 2) 청크2부터 누적 요약 시작
-			if len(prompts) >= 2:
-				# 요약1 = s1 + 청크2
-				filled_prompt = prompts[1].replace("{previous_summary}", s1)
-				if print_prompts:
-					prev_len = len(s1)
-					print(f"\n--- CHUNK 2 / {len(prompts)} ---")
-					print(f"[prev_summary length]: {prev_len}")
-					print("[prompt head]:")
-					print(filled_prompt[:500])
 				summary = generate_with_retry(
 					client=client,
 					model=model,
@@ -232,8 +214,14 @@ def run_chunk_summarization(
 					max_retries=max_retries,
 					sleep_sec=sleep_sec,
 				)
-				chunk_summaries.append(summary)
-				prev_summary = summary
+
+				if ci == 1:
+					s1 = summary
+					prev_summary = summary
+				else:
+					chunk_summaries.append(summary)
+					prev_summary = summary
+
 				time.sleep(sleep_sec)
 				processed_chunks += 1
 				if show_progress and total_chunks > 0:
@@ -246,43 +234,8 @@ def run_chunk_summarization(
 					percent = (processed_chunks / total_chunks) * 100.0
 					print(
 						f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
-						f"sample {idx}/{total} | chunk 2/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
+						f"sample {idx}/{total} | chunk {ci}/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
 					)
-
-				# 이후 청크3..N: 누적 요약 + 다음 청크
-				for ci in range(3, len(prompts) + 1):
-					prompt = prompts[ci - 1]
-					filled_prompt = prompt.replace("{previous_summary}", prev_summary)
-					if print_prompts:
-						prev_len = len(prev_summary)
-						print(f"\n--- CHUNK {ci} / {len(prompts)} ---")
-						print(f"[prev_summary length]: {prev_len}")
-						print("[prompt head]:")
-						print(filled_prompt[:500])
-					summary = generate_with_retry(
-						client=client,
-						model=model,
-						prompt=filled_prompt,
-						options=opts,
-						max_retries=max_retries,
-						sleep_sec=sleep_sec,
-					)
-					chunk_summaries.append(summary)
-					prev_summary = summary
-					time.sleep(sleep_sec)
-					processed_chunks += 1
-					if show_progress and total_chunks > 0:
-						elapsed = time.time() - start_ts
-						rate = processed_chunks / elapsed if elapsed > 0 else 0.0
-						remaining = max(total_chunks - processed_chunks, 0)
-						eta_sec = int(remaining / rate) if rate > 0 else 0
-						eta_min = eta_sec // 60
-						eta_rem = eta_sec % 60
-						percent = (processed_chunks / total_chunks) * 100.0
-						print(
-							f"Progress: {processed_chunks}/{total_chunks} chunks ({percent:.1f}%) | "
-							f"sample {idx}/{total} | chunk {ci}/{len(prompts)} | ETA {eta_min:02d}:{eta_rem:02d}"
-						)
 
 			final_summary = (chunk_summaries[-1] if len(chunk_summaries) > 0 else s1)
 
@@ -309,11 +262,11 @@ def main():
 	)
 	parser.add_argument(
 		"--model",
-		default="hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K",
+		default="hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M",
 		help="Ollama 모델 태그 (예: qwen2.5:8b, qwen2.5:7b-instruct 등)",
 	)
 	parser.add_argument("--temperature", type=float, default=0.2)
-	parser.add_argument("--num-predict", type=int, default=1024, help="최대 생성 토큰")
+	parser.add_argument("--num-predict", type=int, default=None, help="최대 생성 토큰")
 	parser.add_argument("--limit", type=int, default=None, help="처리할 샘플 개수 제한")
 	parser.add_argument("--index", type=int, default=3, help="요약할 N번째 샘플 (1-based). 지정 시 limit 무시")
 	parser.add_argument("--print-prompts", action="store_true", help="치환된 프롬프트(앞 500자)와 이전 요약 길이를 출력")

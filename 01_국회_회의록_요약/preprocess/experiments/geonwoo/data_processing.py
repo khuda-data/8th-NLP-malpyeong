@@ -14,21 +14,21 @@ INPUT_FILE = "국회회의록안건별요약_dev"
 input_path = f"./data/{INPUT_FILE}.json"
 # 고정 크기 청크 분할 길이 (예: 3이면 [0,2], [3,5], ...)
 CHUNK_LEN = 10
-CONFIG_PROMPT = """발언자: {speaker}
+CONFIG_PROMPT = """{PROMPT}
+
+위 규칙에 따라 하나의 {step} 요약문을 생성하시오.
+
+요약 중심 키워드: {keyword}
+발언자:
+{speaker}
 
 이전 요약:
 {previous_summary}
 
 현재 대화:
 {dialogue}
-
-{PROMPT}
-
-주제: {topic}
-주요 키워드: {keyword}
-
-위 규칙에 따라 하나의 최종 요약문을 생성하시오.
 """
+# 주제: {topic}
 CONFIG_SPEAKER = "<역할>{occupation}</역할> <이름>{name}</이름>"
 
 def get_index_from_id(id_):
@@ -41,7 +41,7 @@ def preprocess_conversation(input_conversation, speaker_same_as_previous=False):
     return return_text
 
 def speaker_to_text(speakers):
-    return_text = ", ".join(
+    return_text = "\n".join(
         list(
             map(
                 lambda x: 
@@ -209,7 +209,7 @@ for sample in data:
 
         filter_utterance = "".join("".join(utterance.split(" ")).split("."))
         speaker_and_utterance = (" " if speaker_same_as_previous else conv["speaker"] + ": ") + conv["utterance"]
-        speaker_and_utterance = speaker_and_utterance.replace("......", "<REMOVE_DOTS>")
+        speaker_and_utterance = speaker_and_utterance.replace("......", ".")
 
         if len(filter_utterance) > 10:
             has_digit = any(char.isdigit() for char in utterance)
