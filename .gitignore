@@ -55,7 +55,7 @@ Thumbs.db
 # *.ckpt
 
 # 한국어 일상 대화 연결
-03_한국어_일상_대화_연결/roberta/models
-03_한국어_일상_대화_연결/roberta/klue-roberta-large
+03_한국어_일상_대화_연결/roberta/models/*
+03_한국어_일상_대화_연결/roberta/klue-roberta-large/*
 
 
