@@ -2,6 +2,7 @@
 Ollama(qwen2.5 8B) 기반 청크 요약 실행 스크립트
 ollama pull hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M
 ollama pull hf.co/dnotitia/Llama-DNA-1.0-8B-Instruct-GGUF:Q6_K
+ollama pull hf.co/mradermacher/KO-REAson-7B-Q2_5-0831-GGUF:Q6_K
 
 사용 시나리오
 - data_processing.py가 생성한 processed JSON을 입력으로 받아, 각 청크를 순차 요약합니다.
@@ -52,6 +53,7 @@ import json
 import time
 import argparse
 from typing import List, Dict, Any
+import re 
 
 try:
 	import requests
@@ -62,67 +64,88 @@ with open("./experiments/geonwoo/PROMPT.txt", "r", encoding="utf-8") as f:
 	PROMPT = f.read()
 
 class OllamaClient:
-	def __init__(self, host: str = "http://localhost:11434"):
-		self.base_url = host.rstrip("/")
+    def __init__(self, host: str = "http://localhost:11434"):
+        self.base_url = host.rstrip("/")
 
-	def generate(self, model: str, prompt: str, options: Dict[str, Any] | None = None, stream: bool = False) -> str:
-		url = f"{self.base_url}/api/generate"
-		payload = {
-			"model": model,
-			"prompt": prompt,
-			"stream": stream,
-		}
-		if options:
-			payload["options"] = options
+    def generate(self, model: str, prompt: str, options: Dict[str, Any] | None = None, stream: bool = True) -> str:
+        # stream=True를 기본값으로 변경
+        url = f"{self.base_url}/api/generate"
+        
+        # Context Window 확장 (Reasoning 모델 대비)
+        if options is None:
+            options = {}
+        if "num_ctx" not in options:
+            options["num_ctx"] = 8192 
 
-		resp = requests.post(url, json=payload, timeout=600)
-		resp.raise_for_status()
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": stream, # 스트리밍 활성화
+            "options": options
+        }
 
-		if stream:
-			text = []
-			for line in resp.iter_lines(decode_unicode=True):
-				if not line:
-					continue
-				try:
-					obj = json.loads(line)
-					text.append(obj.get("response", ""))
-				except Exception:
-					continue
-			return "".join(text)
-		else:
-			obj = resp.json()
-			return obj.get("response", "")
+        try:
+            # stream=True일 때는 iter_lines를 써야 하므로 timeout을 넉넉히 주거나 stream 모드에 맞게 처리
+            with requests.post(url, json=payload, stream=stream, timeout=1200) as resp:
+                resp.raise_for_status()
+                
+                if stream:
+                    full_text = []
+                    # 실시간 출력 루프
+                    for line in resp.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            token = obj.get("response", "")
+                            
+                            # 여기서 실시간으로 화면에 출력!
+                            print(token, end="", flush=True)
+                            
+                            full_text.append(token)
+                            
+                            if obj.get("done", False):
+                                break
+                        except Exception:
+                            continue
+                    
+                    print() # 줄바꿈 처리
+                    return "".join(full_text)
+                else:
+                    # stream=False일 경우 (기존 로직)
+                    obj = resp.json()
+                    return obj.get("response", "")
+
+        except requests.exceptions.Timeout:
+            print("\n[Error] 모델 응답 시간 초과")
+            return ""
+        except Exception as e:
+            print(f"\n[Error] Ollama 통신 오류: {e}")
+            return ""
 
 
 def generate_with_retry(
-	client: "OllamaClient",
-	model: str,
-	prompt: str,
-	options: Dict[str, Any] | None,
-	max_retries: int,
-	sleep_sec: float,
+    client: "OllamaClient",
+    model: str,
+    prompt: str,
+    options: Dict[str, Any] | None,
+    max_retries: int,
+    sleep_sec: float,
 ) -> str:
-	"""
-	Generate text and re-infer if output contains a newline or the word '요약'.
-	On retries, append a short instruction to force a single-line output without the banned word.
-	"""
-	attempt = 0
-	last = ""
-	cur_prompt = prompt
-	retry_suffix = "\n\n주의: 출력은 반드시 한 줄로만 작성하고, '요약문'이라는 단어를 포함하지 마세요. 요약 주의사항을 주의 깊게 탐구하세요."
-	while True:
-		last = client.generate(model=model, prompt=cur_prompt, options=options, stream=False).strip()
-		needs_retry = ("\n" in last) or ("요약문" in last)
-		if not needs_retry:
-			return last
-		if attempt >= max_retries:
-			return last
-		attempt += 1
-		print(f"재추론 시도 {attempt}/{max_retries}: 금지된 패턴 발견(\\n 또는 '요약문').")
-		cur_prompt = prompt + retry_suffix
-		time.sleep(sleep_sec)
-
-
+    
+    # [중요] 모델에게 생각을 강제하는 시스템 프롬프트나 접두어를 붙일 수도 있음
+    # 예: prompt = prompt + "\n\nLet's think step by step.\n"
+    
+    print(f"\n[Model: {model}] 추론 및 생성 시작...")
+    
+    retry_count = 0
+    final_summary = ""
+    full_text = client.generate(model=model, prompt=prompt, options=options, stream=True)
+        
+        # 2. 후처리: <think>...</think> 부분 제거
+    final_summary = re.sub(r'<think>.*?</think>', '', full_text, flags=re.DOTALL).strip()
+    
+    return final_summary.strip()
 
 def run_chunk_summarization(
 	processed_file: str,
@@ -141,7 +164,13 @@ def run_chunk_summarization(
 
 	outputs: List[Dict[str, Any]] = []
 	client = OllamaClient()
-	opts = {"temperature": temperature}
+	opts = {
+    	"temperature": temperature,
+    	"num_ctx": 8192,           # 문맥 길이 확보
+    	"repeat_penalty": 1.2,     # [중요] 반복 방지 페널티 (보통 1.1 ~ 1.2 추천)
+    	"stop": ["[END OF SUMMARY]", "[end of summary]"] # [중요] 강제 종료 단어들
+	}
+
 	if num_predict is not None:
 		opts["num_predict"] = num_predict
 
@@ -262,10 +291,10 @@ def main():
 	)
 	parser.add_argument(
 		"--model",
-		default="hf.co/MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M:Q4_K_M",
+		default="hf.co/mradermacher/KO-REAson-7B-Q2_5-0831-GGUF:Q6_K",
 		help="Ollama 모델 태그 (예: qwen2.5:8b, qwen2.5:7b-instruct 등)",
 	)
-	parser.add_argument("--temperature", type=float, default=0.2)
+	parser.add_argument("--temperature", type=float, default=1.0)
 	parser.add_argument("--num-predict", type=int, default=None, help="최대 생성 토큰")
 	parser.add_argument("--limit", type=int, default=None, help="처리할 샘플 개수 제한")
 	parser.add_argument("--index", type=int, default=3, help="요약할 N번째 샘플 (1-based). 지정 시 limit 무시")
