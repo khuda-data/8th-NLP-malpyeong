@@ -118,16 +118,16 @@ def process_single_sample(sample: Dict, next_sentence_id: Optional[str] = None) 
             'next_sentence_id': next_sentence_id,  # 같은 dialogue 내 다음 샘플의 sentence_id
         }
         
-        # 통합 전처리 수행
-        preprocessed_text = preprocess_dialogue_integrated(
-            participants, dialogue, agenda_info
-        )
-        
-        # output (요약 결과) 추출
+        # output (요약 결과) 추출 (전처리 전에 추출하여 SimCSE 기반 태깅에 사용)
         output = sample.get('output', '')
         
-        # 프롬프트 템플릿 생성
-        prompt_text = create_prompt_template(preprocessed_text, include_tag_explanation=True)
+        # 통합 전처리 수행
+        preprocessed_text = preprocess_dialogue_integrated(
+            participants, dialogue, agenda_info, summary=output
+        )
+        
+        # 프롬프트 템플릿 생성 (output을 전달하여 길이 분석에 사용)
+        prompt_text = create_prompt_template(preprocessed_text, output_summary=output, include_tag_explanation=True)
         
         return {
             'id': sample.get('id', ''),

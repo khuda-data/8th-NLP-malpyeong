@@ -1,0 +1,13 @@
+# Preprocess-specific ignores
+# (Python, IDE, OS 등 공통 규칙은 상위 .gitignore 참조)
+
+# Data & Output
+data/
+output/
+
+# Experiments
+experiments/
+
+# Preprocessed files
+*.json
+*.txt

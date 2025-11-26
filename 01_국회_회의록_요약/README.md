@@ -26,8 +26,41 @@ AI 말평에 제시된 국회 회의록 요약 과제를 해결하는 프로젝�
     ├── output/           # 전처리 결과물
     └── experiments/      # 개인 실험/개발 폴더
         ├── jinsu/
-        └── seungju/
 ```
 
 자세한 내용은 [preprocess/src/README.md](./preprocess/src/README.md) 참고
+
+## 모델 개발 전 참고사항
+
+### Test 데이터셋 전처리를 위한 요약 모델 학습 필요
+
+현재 전처리 파이프라인은 **Dev 데이터셋**에 대해서는 정답 요약(`output`)을 사용하여 SimCSE 기반 중요도 태깅을 수행합니다. 하지만 **Test 데이터셋**에는 `output`이 없기 때문에, 동일한 방식으로 전처리를 수행하려면 **요약 모델 학습이 필요**합니다.
+
+#### 필요한 작업
+
+1. **요약 모델 학습**
+   - **입력**: Dev 데이터셋의 전처리된 대화 (`preprocessed_dialogue`, `prompt`)
+   - **출력**: Dev 데이터셋의 정답 요약 (`output`)
+   - **목적**: Test 데이터셋에 대한 예측 요약 생성
+
+2. **예측 요약 생성**
+   - 학습된 요약 모델을 사용하여 Test 데이터셋의 전처리된 대화에 대해 예측 요약 생성
+   - 생성된 예측 요약을 전처리 파이프라인에 전달
+
+3. **CSE 유사도 계산**
+   - 예측 요약과 각 발화 간 SimCSE 기반 코사인 유사도 계산
+   - Dev 데이터셋과 동일한 방식으로 중요 발화 태깅 (`<IMP>` 태그)
+
+#### 전처리 파이프라인 연동 방법
+
+전처리 파이프라인은 다음과 같이 동작합니다:
+- `output`이 있으면: 정답 요약과 발화 간 유사도 계산
+- `output`이 없으면: 규칙 기반 fallback (또는 예측 요약 사용)
+
+따라서 요약 모델로 생성한 예측 요약을 Test 데이터셋의 `output` 필드에 넣어주면, 자동으로 Dev와 동일한 방식으로 전처리가 수행됩니다.
+
+#### 참고
+- 전처리 파이프라인: `preprocess/src/main.py`
+- SimCSE 기반 중요도 태깅: `preprocess/src/importance_by_similarity.py`
+- 자세한 전처리 과정: [preprocess/README.md](./preprocess/README.md)
 
